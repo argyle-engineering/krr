@@ -45,6 +45,8 @@ class K8sObjectData(pd.BaseModel):
     kind: KindLiteral
     allocations: ResourceAllocations
     warnings: set[PodWarning] = set()
+    labels: Optional[dict[str, str]]
+    annotations: Optional[dict[str, str]]
 
     _api_resource = pd.PrivateAttr(None)
 
@@ -87,6 +89,8 @@ class K8sObjectData(pd.BaseModel):
                 namespace=self.namespace,
                 kind=self.kind,
                 allocations=self.allocations,
+                labels=self.labels,
+                annotations=self.labels,
             )
             for batch in batched(self.pods, n)
         ]
