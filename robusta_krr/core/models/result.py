@@ -16,8 +16,8 @@ class Recommendation(pd.BaseModel):
 
 
 class ResourceRecommendation(pd.BaseModel):
-    requests: dict[ResourceType, RecommendationValue]
-    limits: dict[ResourceType, RecommendationValue]
+    requests: dict[ResourceType, Recommendation]
+    limits: dict[ResourceType, Recommendation]
     info: dict[ResourceType, Optional[str]]
 
 

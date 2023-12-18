@@ -20,6 +20,17 @@ def _format(value: RecommendationValue) -> str:
     else:
         return resource_units.format(value)
 
+def _float_diff(item: ResourceScan, resource: ResourceType, multiplier: int=1) -> float:
+    selector = "requests"
+    allocated = getattr(item.object.allocations, selector)[resource]
+    recommended = getattr(item.recommended, selector)[resource]
+    if recommended is None or isinstance(recommended.value, str) or selector != "requests":
+        return 0
+    else:
+        reccomended_val = recommended.value if isinstance(recommended.value, (int, float)) else 0
+        allocated_val = allocated if isinstance(allocated, (int, float)) else 0
+        return ((reccomended_val - allocated_val) * multiplier) 
+
 
 def __calc_diff(allocated, recommended, selector, multiplier=1) -> str:
     if recommended is None or isinstance(recommended.value, str) or selector != "requests":
@@ -99,6 +110,10 @@ def table(result: Result) -> Table:
         table.add_column(f"{resource.name} Requests")
         table.add_column(f"{resource.name} Limits")
 
+    total_diff = dict()
+    for resource in ResourceType:
+        total_diff[resource.name] = 0
+
     for _, group in itertools.groupby(
         enumerate(result.scans), key=lambda x: (x[1].object.cluster, x[1].object.namespace, x[1].object.name)
     ):
@@ -123,7 +138,15 @@ def table(result: Result) -> Table:
             for resource in ResourceType:
                 cells.append(_format_total_diff(item, resource, item.object.current_pods_count))
                 cells += [_format_request_str(item, resource, selector) for selector in ["requests", "limits"]]
+                total_diff[resource.name] += _float_diff(item, resource, item.object.current_pods_count)
 
             table.add_row(*cells, end_section=last_row)
-
+    table.show_footer = True
+    table.columns[0].footer = "Total"
+    for resource in ResourceType:
+        resource_index = [i for i, column in enumerate(table.columns) if f"{resource.name} Diff" == column.header][0]
+        diff_val = total_diff[resource.name]
+        diff_sign = "[green]+[/green]" if diff_val >= 0 else "[red]-[/red]"
+        table.columns[resource_index].footer = f"{diff_sign}{_format(abs(diff_val))}"
+        
     return table

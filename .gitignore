@@ -132,3 +132,5 @@ dmypy.json
 
 .DS_Store
 robusta_lib
+
+*krr-recommender.2023-12-18.private-key.pem

@@ -19,8 +19,8 @@ class VictoriaMetricsDiscovery(MetricsServiceDiscovery):
         """
         url = super().find_url(
             selectors=[
-                "app.kubernetes.io/name=vmsingle",
-                "app.kubernetes.io/name=victoria-metrics-single",
+                # "app.kubernetes.io/name=vmsingle",
+                # "app.kubernetes.io/name=victoria-metrics-single",
             ]
         )
         if url is None:
