@@ -1,9 +1,11 @@
 #!/usr/bin/env python
 
 import os
+import platform
 import pathlib
 import subprocess
 import json
+import datetime
 
 from functools import reduce
 
@@ -14,8 +16,10 @@ from typing_extensions import Annotated
 
 from ruamel.yaml import YAML
 
+import github
 import pprint
 from rich.console import Console
+import git
 
 
 from robusta_krr.formatters.table import table, NONE_LITERAL, NAN_LITERAL
@@ -23,7 +27,8 @@ from robusta_krr.core.models.result import Result
 from robusta_krr.utils import resource_units
 
 WORKLOADS = ["Deployment", "Rollout", "Job", "DaemonSet", "StatefulSet", "CronJob"]
-
+console = Console()
+githubconsole = Console(record=True, no_color=True)
 
 def _format(value):
     if value is None:
@@ -34,7 +39,7 @@ def _format(value):
         return resource_units.format(value)
         
 
-def get_krr_json(label, namespace="*"):
+def get_krr_json(label, namespace="*", prometheus=None, context=None):
     # print(f"loading recomendations for {label} in ns {namespace}")
     if label == "no-selector":
         selector = []
@@ -43,10 +48,19 @@ def get_krr_json(label, namespace="*"):
     namespace_flag = []
     if namespace is not None and namespace != "*":
         namespace_flag = ["-n", namespace]
-    command = [ "krr",  "argyle", "--context", "prod",
-               "-f", "json", "-q", ]
+
+    prometheus_flag = []
+    if prometheus is not None:
+        prometheus_flag = ["-p", prometheus]
+    if context is not None:
+        context = ["--context", context]
+    command = [ "krr",  "argyle",
+               "-f", "json", "-q" ]
     command.extend(selector)
     command.extend(namespace_flag)
+    command.extend(prometheus_flag)
+    command.extend(context)
+    console.print(' '.join(command))
     krr = subprocess.run(command, capture_output=True, encoding="utf8", check=True).stdout
     results = json.loads(krr)
     try:
@@ -55,10 +69,10 @@ def get_krr_json(label, namespace="*"):
         pprint.pprint(results)
     return(results)
 
-def find_recommendations(build_yaml_path, namespace):
+def find_recommendations(build_yaml_path, namespace, prometheus, context=None):
     scans = []
     if build_yaml_path == "no-selector":
-        return get_krr_json("no-selector", namespace=namespace)
+        return get_krr_json("no-selector", namespace=namespace, prometheus=prometheus, context=context)
 
     with open(build_yaml_path, "r") as build_file:
         yaml = YAML(typ='safe')
@@ -77,7 +91,7 @@ def find_recommendations(build_yaml_path, namespace):
                     break
             if namespace is None:
                 namespace = doc["metadata"].get("namespace", "*")
-            results = get_krr_json(f"{label_name}={label}", namespace)
+            results = get_krr_json(f"{label_name}={label}", namespace, prometheus)
             if len(results.scans) == 0:
                 docs.pop(0)
                 continue
@@ -224,12 +238,20 @@ def estimate_cost(cpu, ram):
     ram_node_fraction = ram / NODE_RAM
     node_fraction = max(ram_node_fraction, cpu_node_fraction)
     
-    base_node_costs = [{
-        "resource": "SSD backed PD Capacity",
-        "sku": "B188-61DD-52E4",
-        "quantity": 256,
-        "price": 0.1615
-    }]
+    base_node_costs = [
+        {
+            "resource": "SSD backed PD Capacity",
+            "sku": "B188-61DD-52E4",
+            "quantity": 256,
+            "price": 0.1615
+        },
+        {
+            "resource": "Idle resource costs (estimate)",
+            "sku": None,
+            "quantity": 1,
+            "price": 30
+        },
+    ]
     node_cost = reduce(lambda a, b: a + b["quantity"]*b["price"], base_node_costs, 0)
 
     node_cost_fraction = node_fraction * node_cost
@@ -260,28 +282,129 @@ def estimate_cost(cpu, ram):
     return(cpu_cost, ram_cost, node_cost_fraction)
 
 
-def process_app(path, namespace):
-    results = find_recommendations(path, namespace)
+def process_app(path, namespace, create_pr_flag=False, prometheus=None, key=None, context=None):
+    results = find_recommendations(path, namespace, prometheus, context=context)
     if results is None:
         return None
     unmatched = match_objects(results)
     tbl = table(results)
     total_estimate_in_table(tbl, results)
-    console = Console()
     console.print(tbl)
     if len(unmatched) > 0:
         console.print("found the following unmatched objects")
         console.print(unmatched)
+    pr = create_pr(create_pr_flag, path=path, namespace=namespace, table=tbl, unmatched=unmatched, key=key)
+    console.print(f"PR {pr.number} created. https://github.com/argyle-systems/argyle-k8s/pull/{pr.number} ")
 
 
-def main(path: Annotated[Optional[str], typer.Argument], namespace: Annotated[Optional[str], typer.Option(None)] = None):
-    if path in ["prod", "all"] :
-        pull_repo()
-        build_yamls()
-        for path in pathlib.Path(".build").glob("*-prod.yaml"):
-            process_app(path, namespace)
+
+def get_github_token(key):
+    auth = auth_github_app(key)
+    gi = github.GithubIntegration(auth=auth)
+    token = gi.get_access_token(45242597)
+    return token
+
+
+def auth_github_app(key):
+    return github.Auth.AppAuth(717966, key)
+
+
+def pull_repo(key):
+    token = get_github_token(key)
+    local_path = "k8s_repo"
+    username = "krr-recommender"
+    password = token.token
+    remote = f"https://{username}:{password}@github.com/argyle-systems/argyle-k8s.git"
+    repo = git.Repo.clone_from(remote, local_path)
+    return repo
+
+
+def build_yamls(path=None):
+    if path is None:
+        target = "build-prod"
     else:
-        process_app(path, namespace)
+        target = path
+    make = "make"
+    if platform.system == "Darwin":
+        make = "gmake"
+
+    subprocess.run([make, target])
+
+def create_pr(create=False, path=None, namespace=None, table=None, unmatched=None, key=None):
+    if not create:
+        return
+
+    if table is None:
+        raise ValueError("Need resource table to create the PR body")
+    app = ""
+    if str(path).startswith(".build"):
+        app = str(path).replace(".build/", "").replace("-prod.yaml", "")
+
+    author = git.Actor("Argyle KRR recommender", "infrastructure+krrrecommender@argyle.com")
+    repo = git.Repo(".")
+    branch_name = f"krr-recommender-{datetime.datetime.now().timestamp():0.0f}"
+    branch = repo.create_head(branch_name)
+    branch.checkout()
+
+
+    repo.index.add("namespaces")
+    repo.index.commit(f"Adjusting resources acording to usage{f' for app {app}' if app else f' for namespace {namespace}' if namespace else ''}.", author=author, committer=author)
+
+    githubconsole.print(table)
+    if len(unmatched) > 0:
+        githubconsole.print("found the following unmatched objects")
+        githubconsole.print(unmatched)
+    report = githubconsole.export_text()
+
+
+    g = github.Github(get_github_token(key).token)
+    ghrepo = g.get_repo("argyle-systems/argyle-k8s")
+    body = f'''This is an automated PR to adjust resources{f" for {app}" if app else ""}.
+{"This is created by looking at common selectors in workloads in the build output." if app else ""}
+{f"This is created by looking at all workloads in the namespace {namespace}." if namespace else ""}
+
+Resources recommendations are based on usage and paramaters that can be fine tuned.
+Cost estimates are based on the same strategy used to adjust resources.
+
+```
+{report}
+```
+    '''
+
+    repo.remote("origin").push(branch)
+    pr = ghrepo.create_pull(title="Adjusting resources acording to usage", body=body, head=branch_name, base="master")
+    return pr
+
+def main(path: Annotated[Optional[str], typer.Argument],
+         namespace: Annotated[Optional[str], typer.Option(None)] = None,
+         create_pr: Annotated[Optional[bool], typer.Option(False)] = False,
+         prometheus: Annotated[Optional[str], typer.Option("--prometheus", "-p")] = None,
+         context: Annotated[Optional[str], typer.Option("--context", "-c")] = None
+         ):
+    
+    key_file = os.environ.get("PRIVATE_KEY_FILE")
+    if key_file:
+        with open(key_file, "r") as _f:
+            key = _f.read()
+
+    else:
+        key = os.environ.get("PRIVATE_KEY")
+    
+    if not key:
+        raise ValueError(
+            "Private key not found, please set either PRIVATE_KEY_FILE as a "
+            " path or PRIVATE_KEY with the key contents.")
+    repo = pull_repo(key)
+    os.chdir(repo.working_dir)
+    if path in ["prod", "all"] or path.startswith(".build"):
+        if path.startswith(".build"):
+            build_yamls(path)
+        else:
+            build_yamls()
+        for path in pathlib.Path(".build").glob("*-prod.yaml"):
+            process_app(path, namespace, create_pr, prometheus, key, context=context)
+    else:
+        process_app(path, namespace, create_pr, prometheus, key, context=context)
 
 
 

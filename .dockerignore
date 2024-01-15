@@ -8,9 +8,10 @@ __pycache__
 .git
 .gitignore
 Dockerfile
-*.md
 .vscode
 
 # Exclude logs and cache
 logs/
 cache/
+*.private-key.pem
+k8s_repo/
