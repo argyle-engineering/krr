@@ -52,14 +52,16 @@ def get_krr_json(label, namespace="*", prometheus=None, context=None):
     prometheus_flag = []
     if prometheus is not None:
         prometheus_flag = ["-p", prometheus]
+
+    context_flag = []
     if context is not None:
-        context = ["--context", context]
+        context_flag = ["--context", context]
     command = [ "krr",  "argyle",
                "-f", "json", "-q" ]
     command.extend(selector)
     command.extend(namespace_flag)
     command.extend(prometheus_flag)
-    command.extend(context)
+    command.extend(context_flag)
     console.print(' '.join(command))
     krr = subprocess.run(command, capture_output=True, encoding="utf8", check=True).stdout
     results = json.loads(krr)
@@ -289,12 +291,15 @@ def process_app(path, namespace, create_pr_flag=False, prometheus=None, key=None
     unmatched = match_objects(results)
     tbl = table(results)
     total_estimate_in_table(tbl, results)
-    console.print(tbl)
-    if len(unmatched) > 0:
-        console.print("found the following unmatched objects")
-        console.print(unmatched)
+    # console.print(tbl)
+    # if len(unmatched) > 0:
+    #     console.print("found the following unmatched objects")
+    #     console.print(unmatched)
     pr = create_pr(create_pr_flag, path=path, namespace=namespace, table=tbl, unmatched=unmatched, key=key)
-    console.print(f"PR {pr.number} created. https://github.com/argyle-systems/argyle-k8s/pull/{pr.number} ")
+    if create_pr_flag:
+        console.print(f"PR {pr.number} created. https://github.com/argyle-systems/argyle-k8s/pull/{pr.number} ")
+    else:
+        console.print(f"PR would have been created with {str(pr)}")
 
 
 
@@ -331,9 +336,6 @@ def build_yamls(path=None):
     subprocess.run([make, target])
 
 def create_pr(create=False, path=None, namespace=None, table=None, unmatched=None, key=None):
-    if not create:
-        return
-
     if table is None:
         raise ValueError("Need resource table to create the PR body")
     app = ""
@@ -343,12 +345,13 @@ def create_pr(create=False, path=None, namespace=None, table=None, unmatched=Non
     author = git.Actor("Argyle KRR recommender", "infrastructure+krrrecommender@argyle.com")
     repo = git.Repo(".")
     branch_name = f"krr-recommender-{datetime.datetime.now().timestamp():0.0f}"
-    branch = repo.create_head(branch_name)
-    branch.checkout()
+    commit_msg = f"Adjusting resources acording to usage{f' for app {app}' if app else f' for namespace {namespace}' if namespace else ''}."
 
-
-    repo.index.add("namespaces")
-    repo.index.commit(f"Adjusting resources acording to usage{f' for app {app}' if app else f' for namespace {namespace}' if namespace else ''}.", author=author, committer=author)
+    if create:
+        branch = repo.create_head(branch_name)
+        branch.checkout()
+        repo.index.add("namespaces")
+        repo.index.commit(commit_msg, author=author, committer=author)
 
     githubconsole.print(table)
     if len(unmatched) > 0:
@@ -370,10 +373,14 @@ Cost estimates are based on the same strategy used to adjust resources.
 {report}
 ```
     '''
+    pr_title = f"Adjusting {f'{app} ' if app else ''}resources acording to usage"
 
-    repo.remote("origin").push(branch)
-    pr = ghrepo.create_pull(title="Adjusting resources acording to usage", body=body, head=branch_name, base="master")
-    return pr
+    if create:
+        repo.remote("origin").push(branch)
+        pr = ghrepo.create_pull(title=pr_title, body=body, head=branch_name, base="master")
+        return pr
+    else:
+        return(pr_title, body, branch_name )
 
 def main(path: Annotated[Optional[str], typer.Argument],
          namespace: Annotated[Optional[str], typer.Option(None)] = None,
