@@ -409,7 +409,10 @@ def main(path: Annotated[Optional[str], typer.Argument],
         else:
             build_yamls()
         for path in pathlib.Path(".build").glob("*-prod.yaml"):
-            process_app(path, namespace, create_pr, prometheus, key, context=context)
+            try:
+                process_app(path, namespace, create_pr, prometheus, key, context=context)
+            except Exception as e:
+                console.print(e)
     else:
         process_app(path, namespace, create_pr, prometheus, key, context=context)
 
