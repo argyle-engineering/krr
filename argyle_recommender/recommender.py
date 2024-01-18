@@ -28,7 +28,7 @@ from robusta_krr.utils import resource_units
 
 WORKLOADS = ["Deployment", "Rollout", "Job", "DaemonSet", "StatefulSet", "CronJob"]
 console = Console()
-githubconsole = Console(record=True, no_color=True)
+githubconsole = Console(record=True, no_color=True, width=200)
 
 def _format(value):
     if value is None:
