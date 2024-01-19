@@ -27,8 +27,8 @@ from robusta_krr.core.models.result import Result
 from robusta_krr.utils import resource_units
 
 WORKLOADS = ["Deployment", "Rollout", "Job", "DaemonSet", "StatefulSet", "CronJob"]
-console = Console()
-githubconsole = Console(record=True, no_color=True, width=200)
+console = Console(width=500)
+githubconsole = Console(record=True, no_color=True, width=500)
 
 def _format(value):
     if value is None:
@@ -105,6 +105,9 @@ def find_recommendations(build_yaml_path, namespace, prometheus, context=None):
                 # print(f'object {scan["object"]["name"]}')
                 popped = [docs.pop(i) for i, doc in enumerate(docs) if doc["metadata"]["name"] == scan.object.name]
                 # print(f"popped {len(popped)} objects")
+                if len(popped) == 0:
+                    docs.pop(0)
+                    continue
             scans.extend(results.scans)
     results.scans = scans
     return results
