@@ -87,11 +87,14 @@ def find_recommendations(build_yaml_path, namespace, prometheus, context=None):
             app_name =  doc["metadata"].get("name")
             labels =  doc["metadata"].get("labels")
             for label_name in [
-                "app", "part-of", "app.kubernetes.io/instance", "k8s-app"
+                "app", "part-of", "app.kubernetes.io/instance", "k8s-app", "app.kubernetes.io/name",
             ]:
                 label = labels.get(label_name)
                 if label is not None:
                     break
+            if label is None:
+                label_name = next(iter(labels))
+                label = labels.get(label_name)
             if namespace is None:
                 namespace = doc["metadata"].get("namespace", "*")
             results = get_krr_json(f"{label_name}={label}", namespace, prometheus, app_name=app_name)
