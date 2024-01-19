@@ -39,7 +39,7 @@ def _format(value):
         return resource_units.format(value)
         
 
-def get_krr_json(label, namespace="*", prometheus=None, context=None):
+def get_krr_json(label, namespace="*", prometheus=None, context=None, app_name=None):
     # print(f"loading recomendations for {label} in ns {namespace}")
     if label == "no-selector":
         selector = []
@@ -62,7 +62,7 @@ def get_krr_json(label, namespace="*", prometheus=None, context=None):
     command.extend(namespace_flag)
     command.extend(prometheus_flag)
     command.extend(context_flag)
-    console.print(' '.join(command))
+    console.print(f"{app_name}: {' '.join(command)}")
     krr = subprocess.run(command, capture_output=True, encoding="utf8", check=True).stdout
     results = json.loads(krr)
     try:
@@ -84,6 +84,7 @@ def find_recommendations(build_yaml_path, namespace, prometheus, context=None):
             return None
         while len(docs) > 0:
             doc = docs[0]
+            app_name =  doc["metadata"].get("name")
             labels =  doc["metadata"].get("labels")
             for label_name in [
                 "app", "part-of", "app.kubernetes.io/instance", "k8s-app"
@@ -93,7 +94,7 @@ def find_recommendations(build_yaml_path, namespace, prometheus, context=None):
                     break
             if namespace is None:
                 namespace = doc["metadata"].get("namespace", "*")
-            results = get_krr_json(f"{label_name}={label}", namespace, prometheus)
+            results = get_krr_json(f"{label_name}={label}", namespace, prometheus, app_name=app_name)
             if len(results.scans) == 0:
                 docs.pop(0)
                 continue
@@ -285,6 +286,8 @@ def estimate_cost(cpu, ram):
 
 
 def process_app(path, namespace, create_pr_flag=False, prometheus=None, key=None, context=None):
+    repo = pull_repo(key)
+    os.chdir(repo.working_dir)
     results = find_recommendations(path, namespace, prometheus, context=context)
     if results is None:
         return None
@@ -296,7 +299,7 @@ def process_app(path, namespace, create_pr_flag=False, prometheus=None, key=None
     #     console.print("found the following unmatched objects")
     #     console.print(unmatched)
     pr = create_pr(create_pr_flag, path=path, namespace=namespace, table=tbl, unmatched=unmatched, key=key)
-    if create_pr_flag:
+    if create_pr_flag and not isinstance(pr, tuple):
         console.print(f"PR {pr.number} created. https://github.com/argyle-systems/argyle-k8s/pull/{pr.number} ")
     else:
         console.print(f"PR would have been created with {str(pr)}")
@@ -316,11 +319,19 @@ def auth_github_app(key):
 
 def pull_repo(key):
     token = get_github_token(key)
+    os.chdir("/app")
     local_path = "k8s_repo"
     username = "krr-recommender"
     password = token.token
     remote = f"https://{username}:{password}@github.com/argyle-systems/argyle-k8s.git"
-    repo = git.Repo.clone_from(remote, local_path)
+
+    if os.path.isdir(local_path):
+        repo = git.Repo(local_path)
+        repo.head.reset()
+        repo.heads.master.checkout()
+
+    else:
+        repo = git.Repo.clone_from(remote, local_path)
     return repo
 
 
@@ -341,25 +352,17 @@ def create_pr(create=False, path=None, namespace=None, table=None, unmatched=Non
     app = ""
     if str(path).startswith(".build"):
         app = str(path).replace(".build/", "").replace("-prod.yaml", "")
+    repo = git.Repo(".")
 
     author = git.Actor("Argyle KRR recommender", "infrastructure+krrrecommender@argyle.com")
-    repo = git.Repo(".")
     branch_name = f"krr-recommender-{datetime.datetime.now().timestamp():0.0f}"
     commit_msg = f"Adjusting resources acording to usage{f' for app {app}' if app else f' for namespace {namespace}' if namespace else ''}."
-
-    if create:
-        branch = repo.create_head(branch_name)
-        branch.checkout()
-        repo.index.add("namespaces")
-        repo.index.commit(commit_msg, author=author, committer=author)
-
     githubconsole.print(table)
     if len(unmatched) > 0:
         githubconsole.print("found the following unmatched objects")
         githubconsole.print(unmatched)
+
     report = githubconsole.export_text()
-
-
     g = github.Github(get_github_token(key).token)
     ghrepo = g.get_repo("argyle-systems/argyle-k8s")
     body = f'''This is an automated PR to adjust resources{f" for {app}" if app else ""}.
@@ -375,11 +378,18 @@ Cost estimates are based on the same strategy used to adjust resources.
     '''
     pr_title = f"Adjusting {f'{app} ' if app else ''}resources acording to usage"
 
-    if create:
+    if create and repo.is_dirty():
+        branch = repo.create_head(branch_name)
+        branch.checkout()
+        repo.index.add("namespaces")
+        repo.index.commit(commit_msg, author=author, committer=author)
         repo.remote("origin").push(branch)
         pr = ghrepo.create_pull(title=pr_title, body=body, head=branch_name, base="master")
         return pr
     else:
+        print("No PR created")
+        if not repo.is_dirty():
+            print(f"No changes to be made {f'to {app}' if app else ''}.")
         return(pr_title, body, branch_name )
 
 def main(path: Annotated[Optional[str], typer.Argument],
