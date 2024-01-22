@@ -7,6 +7,9 @@ import subprocess
 import json
 import datetime
 import logging
+import sys
+
+import structlog
 
 from functools import reduce
 
@@ -30,7 +33,34 @@ WORKLOADS = ["Deployment", "Rollout", "Job", "DaemonSet", "StatefulSet", "CronJo
 console = Console(width=500)
 githubconsole = Console(record=True, no_color=True, width=500)
 
-logging.basicConfig(level=logging.INFO)
+
+shared_processors = [
+        structlog.contextvars.merge_contextvars,
+        structlog.processors.add_log_level,
+        structlog.processors.StackInfoRenderer(),
+        structlog.dev.set_exc_info,
+        structlog.processors.TimeStamper(fmt="%Y-%m-%d %H:%M:%S", utc=False),
+]
+if sys.stderr.isatty():
+    # Pretty printing when we run in a terminal session.
+    # Automatically prints pretty tracebacks when "rich" is installed
+    processors = shared_processors + [
+        structlog.dev.ConsoleRenderer(),
+    ]
+else:
+    # Print JSON when we run, e.g., in a Docker container.
+    # Also print structured tracebacks.
+    processors = shared_processors + [
+        structlog.processors.dict_tracebacks,
+        structlog.processors.JSONRenderer(),
+    ]
+
+structlog.configure(
+    wrapper_class=structlog.make_filtering_bound_logger(logging.INFO),
+    processors=processors
+)
+log = structlog.get_logger()
+
 
 def _format(value):
     if value is None:
@@ -73,8 +103,9 @@ def get_krr_json(label, namespace="*", prometheus=None, context=None, app_name=N
         raise
     try:
         results = Result(**results)
-    except Exception:
+    except Exception as e:
         logging.error(results)
+        logging.error(e)
     return results
 
 
@@ -184,8 +215,14 @@ def match_objects(results: Result) -> list[str]:
                 yaml = YAML()
                 workload = yaml.load(workload_file)
                 try:
+                    if isinstance(workload, list):
+                        continue
+                    if workload["kind"] not in WORKLOADS:
+                        continue
                     containers = workload["spec"]["template"]["spec"]["containers"]
                 except KeyError:  # probably a patch file
+                    continue
+                except AttributeError:
                     continue
                 container = get_container_by_name(scan.object.container, containers)
                 if container is None:
@@ -445,7 +482,7 @@ def main(path: Annotated[str, typer.Argument],
             try:
                 process_app(app_yaml, namespace, create_pr, prometheus, key, context=context)
             except Exception as e:
-                logging.error(e)
+                logging.error({"exc_info": e})
     else:
         process_app(path, namespace, create_pr, prometheus, key, context=context)
 

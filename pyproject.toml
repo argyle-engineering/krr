@@ -37,6 +37,7 @@ ipykernel = "^6.27.1"
 ruamel-yaml = "^0.18.5"
 pygithub = "^2.1.1"
 gitpython = "^3.1.40"
+structlog = "^24.1.0"
 
 
 [tool.poetry.group.dev.dependencies]
