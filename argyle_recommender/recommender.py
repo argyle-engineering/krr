@@ -84,8 +84,10 @@ def find_recommendations(build_yaml_path, namespace, prometheus, context=None):
             return None
         while len(docs) > 0:
             doc = docs[0]
-            app_name =  doc["metadata"].get("name")
-            labels =  doc["metadata"].get("labels")
+            app_name = doc["metadata"].get("name")
+            labels = doc["metadata"].get("labels")
+            label = None
+            label_name = None
             for label_name in [
                 "app", "part-of", "app.kubernetes.io/instance", "k8s-app", "app.kubernetes.io/name",
             ]:
@@ -101,13 +103,16 @@ def find_recommendations(build_yaml_path, namespace, prometheus, context=None):
             if len(results.scans) == 0:
                 docs.pop(0)
                 continue
+            all_popped = []
             for scan in results.scans:
                 # print(f'object {scan["object"]["name"]}')
                 popped = [docs.pop(i) for i, doc in enumerate(docs) if doc["metadata"]["name"] == scan.object.name]
-                # print(f"popped {len(popped)} objects")
-                if len(popped) == 0:
-                    docs.pop(0)
-                    continue
+                all_popped.extend(popped)
+                print(f"popped {len(popped)} objects")
+            if len(all_popped) == 0:
+                popped_doc = docs.pop(0)
+                print(f"popped {popped_doc['metadata']['name']} doc")
+                continue
             scans.extend(results.scans)
     results.scans = scans
     return results
@@ -131,7 +136,7 @@ def find_object(name, kind, namespace, labels):
     else:
         return None
 
-    
+
 def get_container_by_name(container_name, container_spec_list):
     for container in container_spec_list:
         if container["name"] == container_name:
@@ -325,7 +330,8 @@ def auth_github_app(key):
 
 def pull_repo(key):
     token = get_github_token(key)
-    os.chdir("/app")
+    app_dir = os.path.normpath(os.path.join(os.path.dirname(__file__), ".."))
+    os.chdir(app_dir)
     local_path = "k8s_repo"
     username = "krr-recommender"
     password = token.token
