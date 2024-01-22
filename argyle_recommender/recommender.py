@@ -6,10 +6,11 @@ import pathlib
 import subprocess
 import json
 import datetime
+import logging
 
 from functools import reduce
 
-from typing import Optional
+from typing import Optional, Union
 
 import typer
 from typing_extensions import Annotated
@@ -17,7 +18,6 @@ from typing_extensions import Annotated
 from ruamel.yaml import YAML
 
 import github
-import pprint
 from rich.console import Console
 import git
 
@@ -30,6 +30,8 @@ WORKLOADS = ["Deployment", "Rollout", "Job", "DaemonSet", "StatefulSet", "CronJo
 console = Console(width=500)
 githubconsole = Console(record=True, no_color=True, width=500)
 
+logging.basicConfig(level=logging.INFO)
+
 def _format(value):
     if value is None:
         return NONE_LITERAL
@@ -37,10 +39,10 @@ def _format(value):
         return NAN_LITERAL
     else:
         return resource_units.format(value)
-        
 
-def get_krr_json(label, namespace="*", prometheus=None, context=None, app_name=None):
-    # print(f"loading recomendations for {label} in ns {namespace}")
+
+def get_krr_json(label, namespace="*", prometheus=None, context=None, app_name=None) -> Result:
+    logging.debug(f"loading recomendations for {label} in ns {namespace}")
     if label == "no-selector":
         selector = []
     else:
@@ -56,23 +58,29 @@ def get_krr_json(label, namespace="*", prometheus=None, context=None, app_name=N
     context_flag = []
     if context is not None:
         context_flag = ["--context", context]
-    command = [ "krr",  "argyle",
-               "-f", "json", "-q" ]
+    command = ["krr", "argyle",
+               "-f", "json", "-q"]
     command.extend(selector)
     command.extend(namespace_flag)
     command.extend(prometheus_flag)
     command.extend(context_flag)
-    console.print(f"{app_name}: {' '.join(command)}")
+    logging.info(f"{app_name}: {' '.join(command)}")
     krr = subprocess.run(command, capture_output=True, encoding="utf8", check=True).stdout
-    results = json.loads(krr)
+    try:
+        results = json.loads(krr)
+    except json.JSONDecodeError:
+        logging.error(krr[:300])
+        raise
     try:
         results = Result(**results)
-    except:
-        pprint.pprint(results)
-    return(results)
+    except Exception:
+        logging.error(results)
+    return results
+
 
 def find_recommendations(build_yaml_path, namespace, prometheus, context=None):
     scans = []
+    results = None
     if build_yaml_path == "no-selector":
         return get_krr_json("no-selector", namespace=namespace, prometheus=prometheus, context=context)
 
@@ -105,15 +113,16 @@ def find_recommendations(build_yaml_path, namespace, prometheus, context=None):
                 continue
             all_popped = []
             for scan in results.scans:
-                # print(f'object {scan["object"]["name"]}')
+                logging.debug(f'object {scan.object.name}')
                 popped = [docs.pop(i) for i, doc in enumerate(docs) if doc["metadata"]["name"] == scan.object.name]
                 all_popped.extend(popped)
-                print(f"popped {len(popped)} objects")
+                logging.debug(f"popped {len(popped)} objects")
             if len(all_popped) == 0:
                 popped_doc = docs.pop(0)
-                print(f"popped {popped_doc['metadata']['name']} doc")
+                logging.debug(f"popped {popped_doc['metadata']['name']} doc")
                 continue
             scans.extend(results.scans)
+    assert isinstance(results, Result)
     results.scans = scans
     return results
 
@@ -143,6 +152,7 @@ def get_container_by_name(container_name, container_spec_list):
             return container
     return None
 
+
 def update_container_by_name(container_name, container_spec_list, container_updated_spec):
     for i, container in enumerate(container_spec_list):
         if container["name"] == container_name:
@@ -150,16 +160,17 @@ def update_container_by_name(container_name, container_spec_list, container_upda
             return container_spec_list
     return container_spec_list
 
+
 def _recommended_to_resources(recommended):
     cpu_requests = _format(recommended.requests["cpu"].value)
     cpu_limits = _format(recommended.limits["cpu"].value)
     memory_requests = _format(recommended.requests["memory"].value)
     memory_limits = _format(recommended.limits["memory"].value)
     return {"requests": {"cpu": cpu_requests, "memory": memory_requests},
-            "limits": {"cpu":cpu_limits, "memory": memory_limits}}
+            "limits": {"cpu": cpu_limits, "memory": memory_limits}}
 
 
-def match_objects(results: Result):
+def match_objects(results: Result) -> list[str]:
     unmatched_objects = []
     for scan in results.scans:
         kind = scan.object.kind.lower()
@@ -181,18 +192,19 @@ def match_objects(results: Result):
                     for resource in scan.recommended.info:
                         if scan.recommended.info[resource] is None:
                             scan.recommended.info[resource] = ""
-                        scan.recommended.info[resource] += f"container not in {file}"
+                        assert scan.recommended.info[resource] is not None
+                        scan.recommended.info[resource] += f"container not in {file}"  # type: ignore
                     unmatched_objects.append(f"{kind}/{namespace}/{name}/{scan.object.container}")
                     continue
                 try:
                     container["resources"] = _recommended_to_resources(scan.recommended)
                 except TypeError as e:
-                    pprint.pprint(f"{kind}/{namespace}/{name} - {file}")
-                    pprint.pprint(container)
+                    logging.error(f"{kind}/{namespace}/{name} - {file}")
+                    logging.error(container)
                     raise e
 
                 workload["spec"]["template"]["spec"]["containers"] = update_container_by_name(scan.object.container, workload["spec"]["template"]["spec"]["containers"], container)
-                
+
                 workload_file.seek(0)
                 yaml.dump(workload, workload_file)
                 workload_file.truncate()
@@ -212,7 +224,7 @@ def total_estimate_in_table(table, results):
     total_cpu_cost = 0
     total_ram_cost = 0
     total_node_cost = 0
-    
+
     table.add_column("Node cost")
     table.add_column("CPU cost")
     table.add_column("RAM cost")
@@ -237,7 +249,6 @@ def total_estimate_in_table(table, results):
     table.columns[-1].footer = f"USD {total_ram_cost:.2f}"
 
 
-
 def estimate_cost(cpu, ram):
     GIGABYTE = 1024 * 1024 * 1024
     HOURS_IN_MONTH = 24 * 30
@@ -251,7 +262,7 @@ def estimate_cost(cpu, ram):
     cpu_node_fraction = cpu / NODE_CPU
     ram_node_fraction = ram / NODE_RAM
     node_fraction = max(ram_node_fraction, cpu_node_fraction)
-    
+
     base_node_costs = [
         {
             "resource": "SSD backed PD Capacity",
@@ -266,7 +277,7 @@ def estimate_cost(cpu, ram):
             "price": 30
         },
     ]
-    node_cost = reduce(lambda a, b: a + b["quantity"]*b["price"], base_node_costs, 0)
+    node_cost = reduce(lambda a, b: a + b["quantity"] * b["price"], base_node_costs, 0)
 
     node_cost_fraction = node_fraction * node_cost
 
@@ -290,13 +301,16 @@ def estimate_cost(cpu, ram):
             "sku": "CF4E-A0C7-E3BF",
         }
     }
-    
+
     cpu_cost = _actual_cost(cpu_costs, ONDEMAND_CPU_RATIO) * cpu
     ram_cost = _actual_cost(ram_costs, ONDEMAND_RAM_RATIO) * ram
-    return(cpu_cost, ram_cost, node_cost_fraction)
+    return (cpu_cost, ram_cost, node_cost_fraction)
 
 
-def process_app(path, namespace, create_pr_flag=False, prometheus=None, key=None, context=None):
+def process_app(path, namespace, create_pr_flag: Union[bool, None] = False, prometheus=None, key=None, context=None):
+    if create_pr_flag is None:
+        create_pr_flag = False
+
     repo = pull_repo(key)
     os.chdir(repo.working_dir)
     results = find_recommendations(path, namespace, prometheus, context=context)
@@ -305,16 +319,11 @@ def process_app(path, namespace, create_pr_flag=False, prometheus=None, key=None
     unmatched = match_objects(results)
     tbl = table(results)
     total_estimate_in_table(tbl, results)
-    # console.print(tbl)
-    # if len(unmatched) > 0:
-    #     console.print("found the following unmatched objects")
-    #     console.print(unmatched)
     pr = create_pr(create_pr_flag, path=path, namespace=namespace, table=tbl, unmatched=unmatched, key=key)
     if create_pr_flag and not isinstance(pr, tuple):
-        console.print(f"PR {pr.number} created. https://github.com/argyle-systems/argyle-k8s/pull/{pr.number} ")
+        logging.info(f"PR {pr.number} created. https://github.com/argyle-systems/argyle-k8s/pull/{pr.number} ")
     else:
-        console.print(f"PR would have been created with {str(pr)}")
-
+        logging.info(f"PR would have been created with {str(pr)}")
 
 
 def get_github_token(key):
@@ -358,7 +367,8 @@ def build_yamls(path=None):
 
     subprocess.run([make, target])
 
-def create_pr(create=False, path=None, namespace=None, table=None, unmatched=None, key=None):
+
+def create_pr(create=False, path=None, namespace=None, table=None, unmatched: list[str] = [], key=None):
     if table is None:
         raise ValueError("Need resource table to create the PR body")
     app = ""
@@ -395,30 +405,31 @@ Cost estimates are based on the same strategy used to adjust resources.
         branch.checkout()
         repo.index.add("namespaces")
         repo.index.commit(commit_msg, author=author, committer=author)
-        repo.remote("origin").push(branch)
+        repo.remote("origin").push(str(branch))
         pr = ghrepo.create_pull(title=pr_title, body=body, head=branch_name, base="master")
         return pr
     else:
-        print("No PR created")
+        logging.info("No PR created")
         if not repo.is_dirty():
-            print(f"No changes to be made {f'to {app}' if app else ''}.")
-        return(pr_title, body, branch_name )
+            logging.info(f"No changes to be made {f'to {app}' if app else ''}.")
+        return (pr_title, body, branch_name)
 
-def main(path: Annotated[Optional[str], typer.Argument],
+
+def main(path: Annotated[str, typer.Argument],
          namespace: Annotated[Optional[str], typer.Option(None)] = None,
          create_pr: Annotated[Optional[bool], typer.Option(False)] = False,
          prometheus: Annotated[Optional[str], typer.Option("--prometheus", "-p")] = None,
          context: Annotated[Optional[str], typer.Option("--context", "-c")] = None
          ):
-    
+
     key_file = os.environ.get("PRIVATE_KEY_FILE")
     if key_file:
         with open(key_file, "r") as _f:
             key = _f.read()
 
     else:
-        key = os.environ.get("PRIVATE_KEY")
-    
+        key = os.environ.get("PRIVATE_KEY", "")
+
     if not key:
         raise ValueError(
             "Private key not found, please set either PRIVATE_KEY_FILE as a "
@@ -430,14 +441,13 @@ def main(path: Annotated[Optional[str], typer.Argument],
             build_yamls(path)
         else:
             build_yamls()
-        for path in pathlib.Path(".build").glob("*-prod.yaml"):
+        for app_yaml in pathlib.Path(".build").glob("*-prod.yaml"):
             try:
-                process_app(path, namespace, create_pr, prometheus, key, context=context)
+                process_app(app_yaml, namespace, create_pr, prometheus, key, context=context)
             except Exception as e:
-                console.print(e)
+                logging.error(e)
     else:
         process_app(path, namespace, create_pr, prometheus, key, context=context)
-
 
 
 if __name__ == "__main__":
