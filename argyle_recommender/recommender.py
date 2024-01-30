@@ -19,6 +19,7 @@ import typer
 from typing_extensions import Annotated
 
 from ruamel.yaml import YAML
+from ruamel.yaml.scalarstring import LiteralScalarString
 
 import github
 from rich.console import Console
@@ -72,7 +73,7 @@ def _format(value):
 
 
 def get_krr_json(label, namespace="*", prometheus=None, context=None, app_name=None) -> Result:
-    logging.debug(f"loading recomendations for {label} in ns {namespace}")
+    logging.debug("loading recomendations for %s in ns %s", label, namespace)
     if label == "no-selector":
         selector = []
     else:
@@ -94,13 +95,16 @@ def get_krr_json(label, namespace="*", prometheus=None, context=None, app_name=N
     command.extend(namespace_flag)
     command.extend(prometheus_flag)
     command.extend(context_flag)
-    logging.info(f"{app_name}: {' '.join(command)}")
+    logging.info("%s: %s", app_name, ' '.join(command))
     krr = subprocess.run(command, capture_output=True, encoding="utf8", check=True).stdout
     try:
         results = json.loads(krr)
     except json.JSONDecodeError:
-        logging.error(krr[:300])
-        raise
+        try:
+            krr = subprocess.run(command, capture_output=True, encoding="utf8", check=True).stdout
+        except json.JSONDecodeError:
+            logging.error(krr[:300])
+            raise
     try:
         results = Result(**results)
     except Exception as e:
@@ -115,7 +119,7 @@ def find_recommendations(build_yaml_path, namespace, prometheus, context=None):
     if build_yaml_path == "no-selector":
         return get_krr_json("no-selector", namespace=namespace, prometheus=prometheus, context=context)
 
-    with open(build_yaml_path, "r") as build_file:
+    with open(build_yaml_path, "r", encoding="utf-8") as build_file:
         yaml = YAML(typ='safe')
         docs = yaml.load_all(build_file)
         docs = [doc for doc in docs if doc.get("kind") in WORKLOADS]
@@ -138,19 +142,20 @@ def find_recommendations(build_yaml_path, namespace, prometheus, context=None):
                 label = labels.get(label_name)
             if namespace is None:
                 namespace = doc["metadata"].get("namespace", "*")
-            results = get_krr_json(f"{label_name}={label}", namespace, prometheus, app_name=app_name)
+            results = get_krr_json(
+                f"{label_name}={label}", namespace, prometheus, app_name=app_name)
             if len(results.scans) == 0:
                 docs.pop(0)
                 continue
             all_popped = []
             for scan in results.scans:
-                logging.debug(f'object {scan.object.name}')
+                logging.debug('object %s', scan.object.name)
                 popped = [docs.pop(i) for i, doc in enumerate(docs) if doc["metadata"]["name"] == scan.object.name]
                 all_popped.extend(popped)
-                logging.debug(f"popped {len(popped)} objects")
+                logging.debug("popped %s objects", len(popped))
             if len(all_popped) == 0:
                 popped_doc = docs.pop(0)
-                logging.debug(f"popped {popped_doc['metadata']['name']} doc")
+                logging.debug("popped %s doc", popped_doc['metadata']['name'])
                 continue
             scans.extend(results.scans)
     assert isinstance(results, Result)
@@ -201,57 +206,78 @@ def _recommended_to_resources(recommended):
             "limits": {"cpu": cpu_limits, "memory": memory_limits}}
 
 
-def match_objects(results: Result) -> list[str]:
-    unmatched_objects = []
+def create_resource_transformers(results: Result) -> None:
+    namespace_path = ""
     for scan in results.scans:
         kind = scan.object.kind.lower()
         name = scan.object.name
         namespace = scan.object.namespace
-        labels = scan.object.labels
-        file = find_object(name, kind, namespace, labels)
-        if file is not None:
-            with open(file, "r+") as workload_file:
+        container = scan.object.container
+        namespace_path = namespace.replace("argyle-", "")
 
-                yaml = YAML()
-                workload = yaml.load(workload_file)
-                try:
-                    if isinstance(workload, list):
-                        continue
-                    if workload["kind"] not in WORKLOADS:
-                        continue
-                    containers = workload["spec"]["template"]["spec"]["containers"]
-                except KeyError:  # probably a patch file
-                    continue
-                except AttributeError:
-                    continue
-                container = get_container_by_name(scan.object.container, containers)
-                if container is None:
-                    for resource in scan.recommended.info:
-                        if scan.recommended.info[resource] is None:
-                            scan.recommended.info[resource] = ""
-                        assert scan.recommended.info[resource] is not None
-                        scan.recommended.info[resource] += f"container not in {file}"  # type: ignore
-                    unmatched_objects.append(f"{kind}/{namespace}/{name}/{scan.object.container}")
-                    continue
-                try:
-                    container["resources"] = _recommended_to_resources(scan.recommended)
-                except TypeError as e:
-                    logging.error(f"{kind}/{namespace}/{name} - {file}")
-                    logging.error(container)
-                    raise e
+        transformer_path = pathlib.Path(
+            f"namespaces/{namespace_path}/resources/{name}-{kind}-resourcetransformer.yaml"
+        )
 
-                workload["spec"]["template"]["spec"]["containers"] = update_container_by_name(scan.object.container, workload["spec"]["template"]["spec"]["containers"], container)
-
-                workload_file.seek(0)
-                yaml.dump(workload, workload_file)
-                workload_file.truncate()
+        mode = "r+"
+        if transformer_path.is_file():
+            transformer_exists = True
         else:
-            unmatched_objects.append(f"{kind}/{namespace}/{name}/{scan.object.container}")
-    return unmatched_objects
+            transformer_exists = False
+            mode = "w+"
+        os.makedirs(transformer_path.parent, exist_ok=True)
+
+        with open(transformer_path, mode, encoding="utf-8") as transformer_file:
+            yaml = YAML()
+            transformer = None
+            if transformer_exists:
+                transformer = yaml.load(transformer_file)
+                transformer_file.seek(0)
+                if transformer is None or transformer.get("resourceQuotas") is None:
+                    transformer_exists = False
+                    transformer = {}
+            if not transformer_exists:
+                transformer = {
+                    "apiVersion": "argyle.com/v1",
+                    "kind": "ResourceQuotaTransformer",
+                    "metadata": {
+                        "name": f"{name}-{kind}",
+                        "annotations": {
+                            "config.kubernetes.io/function":
+                            LiteralScalarString('''exec:
+  path: argyle-resource-quota-transformer''')
+                        },
+                    },
+                    "resourceQuotas":[]
+                }
+            assert transformer
+
+            try:
+                resource_quota =  {
+                    **_recommended_to_resources(scan.recommended),
+                    "workload" : name,
+                    "container": container,
+                    "kind": kind
+                }
+                transformer["resourceQuotas"] = [
+                    r for r in transformer["resourceQuotas"] if r["container"] != container]
+                transformer["resourceQuotas"].append(resource_quota)
+            except TypeError as e:
+                logging.error("%s/%s/%s/%s", kind, namespace, name, container)
+                raise e
+
+            yaml.dump(transformer, transformer_file)
+            transformer_file.truncate()
+            transformer_file.seek(0)
+    handle_kustomizations(f"namespaces/{namespace_path}/resources/")
+    return None
 
 
 def _actual_cost(costs: dict, ondemand_ratio: float):
-    return (costs["ondemand"]["price"] * ondemand_ratio + costs["committed"]["price"] * (1 - ondemand_ratio))
+    return (
+        costs["ondemand"]["price"] * ondemand_ratio
+        + costs["committed"]["price"] * (1 - ondemand_ratio)
+    )
 
 
 def total_estimate_in_table(table, results):
@@ -344,6 +370,72 @@ def estimate_cost(cpu, ram):
     return (cpu_cost, ram_cost, node_cost_fraction)
 
 
+def handle_kustomizations(resources_path):
+    kustomization_path = pathlib.Path(f"{resources_path}/kustomization.yaml")
+
+    mode = "r+"
+    if kustomization_path.is_file():
+        kustomization_exists = True
+    else:
+        kustomization_exists = False
+        mode = "w+"
+    with open(kustomization_path, mode, encoding="utf-8") as kustomization_file:
+        yaml = YAML()
+        resources_component = None
+        if kustomization_exists:
+            resources_component = yaml.load(kustomization_file)
+            kustomization_file.seek(0)
+            if resources_component is None or "transformers" not in resources_component:
+                kustomization_exists = False
+        if not kustomization_exists:
+            resources_component = {
+                "apiVersion": "kustomize.config.k8s.io/v1alpha1",
+                "kind": "Component",
+                "transformers": []
+            }
+        assert resources_component
+        resources_component["transformers"] = [
+            t for t in resources_component["transformers"] if "resourcetransformer.yaml" not in t]
+        resources_component["transformers"].extend(
+            [t for t in os.listdir(resources_path) if "resourcetransformer.yaml" in t])
+        yaml.dump(resources_component, kustomization_file)
+        kustomization_file.truncate()
+        kustomization_file.seek(0)
+    subprocess.run([
+        "argyle-kustomize-fmt", kustomization_path ],
+        capture_output=True, encoding="utf8", check=True)
+
+    parent_kustomization_path = kustomization_path.parent.parent.joinpath("kustomization.yaml")
+
+    if str(parent_kustomization_path) == "namespaces/scanners/kustomization.yaml":
+        parent_kustomization_path = pathlib.Path("namespaces/scanners/app-base/kustomization.yaml")
+    mode = "r+"
+    if parent_kustomization_path.is_file():
+        parent_kustomization_exists = True
+    else:
+        parent_kustomization_exists = False
+        mode = "w+"
+    with parent_kustomization_path.open(mode, encoding="utf-8") as parent_kustomization_file:
+        yaml = YAML()
+        parent_kustomization = {}
+        if parent_kustomization_exists:
+            parent_kustomization = yaml.load(parent_kustomization_file)
+            parent_kustomization_file.seek(0)
+            if parent_kustomization is None:
+                parent_kustomization_exists = False
+        if not parent_kustomization_exists:
+            raise ValueError(f"parent kustomization {parent_kustomization_path} does not exist")
+        components = (
+            parent_kustomization["components"] if
+            "components" in parent_kustomization else [])
+        components = [c for c in components if c != kustomization_path.parent.name]
+        components.append(kustomization_path.parent.name)
+        parent_kustomization["components"] = components
+        yaml.dump(parent_kustomization, parent_kustomization_file)
+        parent_kustomization_file.truncate()
+        parent_kustomization_file.seek(0)
+
+
 def process_app(path, namespace, create_pr_flag: Union[bool, None] = False, prometheus=None, key=None, context=None):
     if create_pr_flag is None:
         create_pr_flag = False
@@ -353,14 +445,14 @@ def process_app(path, namespace, create_pr_flag: Union[bool, None] = False, prom
     results = find_recommendations(path, namespace, prometheus, context=context)
     if results is None:
         return None
-    unmatched = match_objects(results)
+    create_resource_transformers(results)
     tbl = table(results)
     total_estimate_in_table(tbl, results)
-    pr = create_pr(create_pr_flag, path=path, namespace=namespace, table=tbl, unmatched=unmatched, key=key)
+    pr = create_pr_func(create_pr_flag, path=path, namespace=namespace, table=tbl, key=key)
     if create_pr_flag and not isinstance(pr, tuple):
-        logging.info(f"PR {pr.number} created. https://github.com/argyle-systems/argyle-k8s/pull/{pr.number} ")
+        logging.info("PR %s created. https://github.com/argyle-systems/argyle-k8s/pull/%s ", pr.number, pr.number)
     else:
-        logging.info(f"PR would have been created with {str(pr)}")
+        logging.info("PR would have been created with %s", str(pr))
 
 
 def get_github_token(key):
@@ -399,13 +491,13 @@ def build_yamls(path=None):
     else:
         target = path
     make = "make"
-    if platform.system == "Darwin":
+    if platform.system() == "Darwin":
         make = "gmake"
 
-    subprocess.run([make, target])
+    subprocess.run([make, target], check=True)
 
 
-def create_pr(create=False, path=None, namespace=None, table=None, unmatched: list[str] = [], key=None):
+def create_pr_func(create=False, path=None, namespace=None, table=None, key=None):
     if table is None:
         raise ValueError("Need resource table to create the PR body")
     app = ""
@@ -413,13 +505,16 @@ def create_pr(create=False, path=None, namespace=None, table=None, unmatched: li
         app = str(path).replace(".build/", "").replace("-prod.yaml", "")
     repo = git.Repo(".")
 
+    branch_suffix = ""
+    if app:
+        branch_suffix = f"{app}"
+    else:
+        branch_suffix = f"{datetime.datetime.now().timestamp():0.0f}"
+
     author = git.Actor("Argyle KRR recommender", "infrastructure+krrrecommender@argyle.com")
-    branch_name = f"krr-recommender-{datetime.datetime.now().timestamp():0.0f}"
+    branch_name = f"krr-recommender-{branch_suffix}"
     commit_msg = f"Adjusting resources acording to usage{f' for app {app}' if app else f' for namespace {namespace}' if namespace else ''}."
     githubconsole.print(table)
-    if len(unmatched) > 0:
-        githubconsole.print("found the following unmatched objects")
-        githubconsole.print(unmatched)
 
     report = githubconsole.export_text()
     g = github.Github(get_github_token(key).token)
@@ -429,7 +524,7 @@ def create_pr(create=False, path=None, namespace=None, table=None, unmatched: li
 {f"This is created by looking at all workloads in the namespace {namespace}." if namespace else ""}
 
 Resources recommendations are based on usage and paramaters that can be fine tuned.
-Cost estimates are based on the same strategy used to adjust resources.
+Monthly xost estimates are based on the same strategy used to adjust resources.
 
 ```
 {report}
@@ -437,10 +532,11 @@ Cost estimates are based on the same strategy used to adjust resources.
     '''
     pr_title = f"Adjusting {f'{app} ' if app else ''}resources acording to usage"
 
+    if create:
+        repo.index.add(["namespaces"])
     if create and repo.is_dirty():
         branch = repo.create_head(branch_name)
         branch.checkout()
-        repo.index.add("namespaces")
         repo.index.commit(commit_msg, author=author, committer=author)
         repo.remote("origin").push(str(branch))
         pr = ghrepo.create_pull(title=pr_title, body=body, head=branch_name, base="master")
@@ -448,7 +544,7 @@ Cost estimates are based on the same strategy used to adjust resources.
     else:
         logging.info("No PR created")
         if not repo.is_dirty():
-            logging.info(f"No changes to be made {f'to {app}' if app else ''}.")
+            logging.info("No changes to be made%s.", f' to {app}' if app else '')
         return (pr_title, body, branch_name)
 
 
@@ -461,7 +557,7 @@ def main(path: Annotated[str, typer.Argument],
 
     key_file = os.environ.get("PRIVATE_KEY_FILE")
     if key_file:
-        with open(key_file, "r") as _f:
+        with open(key_file, "r", encoding="utf-8") as _f:
             key = _f.read()
 
     else:
@@ -481,13 +577,14 @@ def main(path: Annotated[str, typer.Argument],
         for app_yaml in pathlib.Path(".build").glob("*-prod.yaml"):
             try:
                 process_app(app_yaml, namespace, create_pr, prometheus, key, context=context)
-            except Exception as e:
-                logging.error({"exc_info": e})
+            except Exception:
+                logging.exception("error in processing app %s", app_yaml, stack_info=True)
     else:
         process_app(path, namespace, create_pr, prometheus, key, context=context)
 
 
 if __name__ == "__main__":
-    app = typer.Typer(pretty_exceptions_show_locals=False)
+    show_locals = sys.stderr.isatty()
+    app = typer.Typer(pretty_exceptions_show_locals=show_locals)
     app.command()(main)
     app()
