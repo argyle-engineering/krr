@@ -160,6 +160,7 @@ def find_recommendations(build_yaml_path, namespace, prometheus, context=None):
             scans.extend(results.scans)
     assert isinstance(results, Result)
     results.scans = scans
+    results = Result(**results.dict())  # reinit to calculate score
     return results
 
 
@@ -206,17 +207,21 @@ def _recommended_to_resources(recommended):
             "limits": {"cpu": cpu_limits, "memory": memory_limits}}
 
 
-def create_resource_transformers(results: Result) -> None:
-    namespace_path = ""
+def create_resource_transformers(results: Result, path: Union[str, pathlib.Path]) -> None:
+    app_path = ""
     for scan in results.scans:
         kind = scan.object.kind.lower()
         name = scan.object.name
         namespace = scan.object.namespace
         container = scan.object.container
-        namespace_path = namespace.replace("argyle-", "")
+
+        if isinstance(path, str):
+            app_path = app_path.replace(".build/", "").replace("-prod.yaml", "")
+        if isinstance(path, pathlib.Path):
+            app_path = path.name.replace("-prod.yaml", "")
 
         transformer_path = pathlib.Path(
-            f"namespaces/{namespace_path}/resources/{name}-{kind}-resourcetransformer.yaml"
+            f"namespaces/{app_path}/resources/{name}-{kind}-resourcetransformer.yaml"
         )
 
         mode = "r+"
@@ -269,7 +274,7 @@ def create_resource_transformers(results: Result) -> None:
             yaml.dump(transformer, transformer_file)
             transformer_file.truncate()
             transformer_file.seek(0)
-    handle_kustomizations(f"namespaces/{namespace_path}/resources/")
+    handle_kustomizations(f"namespaces/{app_path}/resources/")
     return None
 
 
@@ -445,9 +450,12 @@ def process_app(path, namespace, create_pr_flag: Union[bool, None] = False, prom
     results = find_recommendations(path, namespace, prometheus, context=context)
     if results is None:
         return None
-    create_resource_transformers(results)
+    create_resource_transformers(results, path)
     tbl = table(results)
     total_estimate_in_table(tbl, results)
+    if create_pr_flag and results.score > 70:
+        logging.info("Score %s is above 70, not creating PR", results.score)
+        create_pr_flag = False
     pr = create_pr_func(create_pr_flag, path=path, namespace=namespace, table=tbl, key=key)
     if create_pr_flag and not isinstance(pr, tuple):
         logging.info("PR %s created. https://github.com/argyle-systems/argyle-k8s/pull/%s ", pr.number, pr.number)
