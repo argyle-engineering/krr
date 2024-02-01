@@ -73,7 +73,7 @@ def _format(value):
 
 
 def get_krr_json(label, namespace="*", prometheus=None, context=None, app_name=None) -> Result:
-    logging.debug("loading recomendations for %s in ns %s", label, namespace)
+    log.debug("loading recomendations for %s in ns %s", label, namespace)
     if label == "no-selector":
         selector = []
     else:
@@ -95,21 +95,23 @@ def get_krr_json(label, namespace="*", prometheus=None, context=None, app_name=N
     command.extend(namespace_flag)
     command.extend(prometheus_flag)
     command.extend(context_flag)
-    logging.info("%s: %s", app_name, ' '.join(command))
+    log.info("%s: %s", app_name, ' '.join(command))
     krr = subprocess.run(command, capture_output=True, encoding="utf8", check=True).stdout
+    results = None
     try:
         results = json.loads(krr)
     except json.JSONDecodeError:
         try:
             krr = subprocess.run(command, capture_output=True, encoding="utf8", check=True).stdout
         except json.JSONDecodeError:
-            logging.error(krr[:300])
+            log.error(krr[:300])
             raise
+    assert results
     try:
         results = Result(**results)
     except Exception as e:
-        logging.error(results)
-        logging.error(e)
+        log.error(results)
+        log.error(e)
     return results
 
 
@@ -149,13 +151,13 @@ def find_recommendations(build_yaml_path, namespace, prometheus, context=None):
                 continue
             all_popped = []
             for scan in results.scans:
-                logging.debug('object %s', scan.object.name)
+                log.debug('object %s', scan.object.name)
                 popped = [docs.pop(i) for i, doc in enumerate(docs) if doc["metadata"]["name"] == scan.object.name]
                 all_popped.extend(popped)
-                logging.debug("popped %s objects", len(popped))
+                log.debug("popped %s objects", len(popped))
             if len(all_popped) == 0:
                 popped_doc = docs.pop(0)
-                logging.debug("popped %s doc", popped_doc['metadata']['name'])
+                log.debug("popped %s doc", popped_doc['metadata']['name'])
                 continue
             scans.extend(results.scans)
     assert isinstance(results, Result)
@@ -208,6 +210,7 @@ def _recommended_to_resources(recommended):
 
 
 def create_resource_transformers(results: Result, path: Union[str, pathlib.Path]) -> None:
+    path = pathlib.Path(path)
     app_path = ""
     for scan in results.scans:
         kind = scan.object.kind.lower()
@@ -215,10 +218,9 @@ def create_resource_transformers(results: Result, path: Union[str, pathlib.Path]
         namespace = scan.object.namespace
         container = scan.object.container
 
-        if isinstance(path, str):
-            app_path = app_path.replace(".build/", "").replace("-prod.yaml", "")
-        if isinstance(path, pathlib.Path):
-            app_path = path.name.replace("-prod.yaml", "")
+        app_path = path.name.replace("-prod.yaml", "")
+        if app_path.startswith("scanners-application-"):
+            app_path = "scanners"
 
         transformer_path = pathlib.Path(
             f"namespaces/{app_path}/resources/{name}-{kind}-resourcetransformer.yaml"
@@ -262,13 +264,13 @@ def create_resource_transformers(results: Result, path: Union[str, pathlib.Path]
                     **_recommended_to_resources(scan.recommended),
                     "workload" : name,
                     "container": container,
-                    "kind": kind
+                    "kind": kind.title()
                 }
                 transformer["resourceQuotas"] = [
                     r for r in transformer["resourceQuotas"] if r["container"] != container]
                 transformer["resourceQuotas"].append(resource_quota)
             except TypeError as e:
-                logging.error("%s/%s/%s/%s", kind, namespace, name, container)
+                log.error("%s/%s/%s/%s", kind, namespace, name, container)
                 raise e
 
             yaml.dump(transformer, transformer_file)
@@ -441,7 +443,9 @@ def handle_kustomizations(resources_path):
         parent_kustomization_file.seek(0)
 
 
-def process_app(path, namespace, create_pr_flag: Union[bool, None] = False, prometheus=None, key=None, context=None):
+def process_app(path: Union[str, pathlib.Path], namespace,
+                create_pr_flag: Union[bool, None] = False,
+                prometheus=None, key=None, context=None):
     if create_pr_flag is None:
         create_pr_flag = False
 
@@ -454,13 +458,14 @@ def process_app(path, namespace, create_pr_flag: Union[bool, None] = False, prom
     tbl = table(results)
     total_estimate_in_table(tbl, results)
     if create_pr_flag and results.score > 70:
-        logging.info("Score %s is above 70, not creating PR", results.score)
+        log.info("Score %s is above 70, not creating PR", results.score)
         create_pr_flag = False
     pr = create_pr_func(create_pr_flag, path=path, namespace=namespace, table=tbl, key=key)
     if create_pr_flag and not isinstance(pr, tuple):
-        logging.info("PR %s created. https://github.com/argyle-systems/argyle-k8s/pull/%s ", pr.number, pr.number)
+        log.info("PR %s created. https://github.com/argyle-systems/argyle-k8s/pull/%s ",
+                 pr.number, pr.number)
     else:
-        logging.info("PR would have been created with %s", str(pr))
+        log.info("PR's content would have been %s", str(pr))
 
 
 def get_github_token(key):
@@ -543,16 +548,51 @@ Monthly xost estimates are based on the same strategy used to adjust resources.
     if create:
         repo.index.add(["namespaces"])
     if create and repo.is_dirty():
-        branch = repo.create_head(branch_name)
-        branch.checkout()
+        try:
+            # check if remote branch exists
+            origin = repo.remote("origin")
+            origin.fetch(branch_name)
+            repo.create_head(branch_name, origin.refs[branch_name])
+            repo.heads[branch_name].set_tracking_branch(origin.refs[branch_name])
+            repo.git.stash('save')
+            repo.heads[branch_name].checkout()
+            try:
+                repo.git.stash('pop')
+            except git.GitCommandError: # conflict
+                conflict_list = repo.git.diff(name_only=True, diff_filter="U").split("\n")
+                for conflict in conflict_list:
+                    repo.git.checkout("--theirs", conflict)  # resolve in favor of latest change
+                    repo.git.rm(conflict, cached=True)
+                    repo.git.add(conflict)
+                repo.git.stash("drop")
+
+        except git.GitCommandError: # if it does not exist, create it
+            branch = repo.create_head(branch_name)
+            branch.checkout()
+
         repo.index.commit(commit_msg, author=author, committer=author)
-        repo.remote("origin").push(str(branch))
-        pr = ghrepo.create_pull(title=pr_title, body=body, head=branch_name, base="master")
-        return pr
+
+        try:
+            repo.remote("origin").push(branch_name).raise_if_error()
+        except git.GitError as e:
+            log.error("Error pushing to origin")
+            log.error(e)
+            return (pr_title, body, branch_name)
+        try:
+            pr = ghrepo.create_pull(title=pr_title, body=body, head=branch_name, base="master")
+            return pr
+        except github.GithubException as e:
+            messages = [er.get("message") for er in e.data.get("errors", dict())]
+            if [m for m in messages if "A pull request already exists for" in m]:
+                log.info("PR already exists, new commit pushed")
+            else:
+                log.error("Error creating PR")
+                log.error(e)
+            return (pr_title, body, branch_name)
     else:
-        logging.info("No PR created")
+        log.info("No PR created")
         if not repo.is_dirty():
-            logging.info("No changes to be made%s.", f' to {app}' if app else '')
+            log.info("No changes to be made%s.", f' to {app}' if app else '')
         return (pr_title, body, branch_name)
 
 
@@ -586,7 +626,7 @@ def main(path: Annotated[str, typer.Argument],
             try:
                 process_app(app_yaml, namespace, create_pr, prometheus, key, context=context)
             except Exception:
-                logging.exception("error in processing app %s", app_yaml, stack_info=True)
+                log.exception("error in processing app %s", app_yaml, stack_info=True)
     else:
         process_app(path, namespace, create_pr, prometheus, key, context=context)
 
