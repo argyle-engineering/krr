@@ -13,7 +13,11 @@ ENV PIP_NO_CACHE_DIR=off \
 RUN apt-get update \
     && dpkg --add-architecture arm64 \
     && apt-get install --no-install-recommends -y \
-        build-essential
+        build-essential curl gpg
+
+RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | gpg --dearmor -o /usr/share/keyrings/githubcli-archive-keyring.gpg;
+RUN echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | tee /etc/apt/sources.list.d/github-cli.list > /dev/null;
+RUN apt update && apt install -y gh;
 
 # https://python-poetry.org/docs/#installing-manually
 RUN python -m venv ${POETRY_VENV}
@@ -31,6 +35,11 @@ RUN curl -sLo ksops.tar.gz https://github.com/argyle-engineering/ksops/releases/
     && mkdir -p "$HOME/go/bin" \
     && mv ksops "$HOME/go/bin" 
 RUN curl -s "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh" | bash -s - 5.1.0 $HOME/go/bin/ 
+RUN --mount=type=secret,id=GITHUB_TOKEN \
+    export GH_TOKEN=$(cat /run/secrets/GITHUB_TOKEN) \
+    && gh release download --clobber -R "argyle-systems/argyle-resource-quota-transformer" --pattern "argyle-resource-quota-transformer_Linux_x86_64.tar.gz" -D "/tmp" \
+    && tar -xzf "/tmp/argyle-resource-quota-transformer_Linux_x86_64.tar.gz" -C "/tmp" \
+    && mv "/tmp/argyle-resource-quota-transformer" "/root/go/bin"
 ENV PATH="${POETRY_VENV}/bin:/root/go/bin:/google-cloud-sdk/bin::${PATH}"
 
 RUN curl -fsSLO https://dl.google.com/dl/cloudsdk/channels/rapid/google-cloud-sdk.tar.gz \
