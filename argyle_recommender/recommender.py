@@ -122,7 +122,7 @@ def find_recommendations(build_yaml_path, namespace, prometheus, context=None):
         return get_krr_json("no-selector", namespace=namespace, prometheus=prometheus, context=context)
 
     with open(build_yaml_path, "r", encoding="utf-8") as build_file:
-        yaml = YAML(typ='safe')
+        yaml = YAML()
         docs = yaml.load_all(build_file)
         docs = [doc for doc in docs if doc.get("kind") in WORKLOADS]
         if len(docs) == 0:
