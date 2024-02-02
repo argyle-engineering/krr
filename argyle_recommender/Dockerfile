@@ -40,6 +40,11 @@ RUN --mount=type=secret,id=GITHUB_TOKEN \
     && gh release download --clobber -R "argyle-systems/argyle-resource-quota-transformer" --pattern "argyle-resource-quota-transformer_Linux_x86_64.tar.gz" -D "/tmp" \
     && tar -xzf "/tmp/argyle-resource-quota-transformer_Linux_x86_64.tar.gz" -C "/tmp" \
     && mv "/tmp/argyle-resource-quota-transformer" "/root/go/bin"
+RUN --mount=type=secret,id=GITHUB_TOKEN \
+    export GH_TOKEN=$(cat /run/secrets/GITHUB_TOKEN) \
+    && gh release download --clobber -R "argyle-systems/argyle-kustomize-fmt" --pattern "argyle-kustomize-fmt_Linux_x86_64.tar.gz" -D "/tmp" \
+    && tar -xzf "/tmp/argyle-kustomize-fmt_Linux_x86_64.tar.gz" -C "/tmp" \
+    && mv "/tmp/argyle-kustomize-fmt" "/root/go/bin"
 ENV PATH="${POETRY_VENV}/bin:/root/go/bin:/google-cloud-sdk/bin::${PATH}"
 
 RUN curl -fsSLO https://dl.google.com/dl/cloudsdk/channels/rapid/google-cloud-sdk.tar.gz \
