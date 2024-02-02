@@ -2,6 +2,7 @@ FROM python:3.11 as builder
 
 # Set the working directory
 WORKDIR /app
+ARG KUSTOMIZE_FMT_VERSION=0.0.10
 
 # Install system dependencies required for Poetry
 ENV PIP_NO_CACHE_DIR=off \
@@ -42,7 +43,7 @@ RUN --mount=type=secret,id=GITHUB_TOKEN \
     && mv "/tmp/argyle-resource-quota-transformer" "/root/go/bin"
 RUN --mount=type=secret,id=GITHUB_TOKEN \
     export GH_TOKEN=$(cat /run/secrets/GITHUB_TOKEN) \
-    && gh release download --clobber -R "argyle-systems/argyle-kustomize-fmt" --pattern "argyle-kustomize-fmt_Linux_x86_64.tar.gz" -D "/tmp" \
+    && gh release download --clobber -R "argyle-systems/argyle-kustomize-fmt" --pattern "argyle-kustomize-fmt_${KUSTOMIZE_FMT_VERSION}_linux_386.tar.gz" -O "/tmp/argyle-kustomize-fmt_Linux_x86_64.tar.gz" \
     && tar -xzf "/tmp/argyle-kustomize-fmt_Linux_x86_64.tar.gz" -C "/tmp" \
     && mv "/tmp/argyle-kustomize-fmt" "/root/go/bin"
 ENV PATH="${POETRY_VENV}/bin:/root/go/bin:/google-cloud-sdk/bin::${PATH}"
