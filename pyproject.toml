@@ -24,7 +24,7 @@ krr = "robusta_krr.main:run"
 
 [tool.poetry.dependencies]
 python = ">=3.9,<3.12"
-typer = { extras = ["all"], version = "^0.7.0" }
+typer = { extras = ["all"], version = "^0.9.0" }
 pydantic = "1.10.7"
 kubernetes = "^26.1.0"
 prometheus-api-client = "^0.5.3"
@@ -38,6 +38,7 @@ ruamel-yaml = "^0.18.5"
 pygithub = "^2.1.1"
 gitpython = "^3.1.40"
 structlog = "^24.1.0"
+rich = "^13.7.0"
 
 
 [tool.poetry.group.dev.dependencies]

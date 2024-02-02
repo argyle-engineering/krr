@@ -119,7 +119,8 @@ def find_recommendations(build_yaml_path, namespace, prometheus, context=None):
     scans = []
     results = None
     if build_yaml_path == "no-selector":
-        return get_krr_json("no-selector", namespace=namespace, prometheus=prometheus, context=context)
+        return get_krr_json("no-selector", namespace=namespace,
+                            prometheus=prometheus, context=context)
 
     with open(build_yaml_path, "r", encoding="utf-8") as build_file:
         yaml = YAML()
@@ -212,13 +213,13 @@ def _recommended_to_resources(recommended):
 def create_resource_transformers(results: Result, path: Union[str, pathlib.Path]) -> None:
     path = pathlib.Path(path)
     app_path = ""
+    app_path = path.name.replace("-prod.yaml", "")
     for scan in results.scans:
         kind = scan.object.kind.lower()
         name = scan.object.name
         namespace = scan.object.namespace
         container = scan.object.container
 
-        app_path = path.name.replace("-prod.yaml", "")
         if app_path.startswith("scanners-application-"):
             app_path = "scanners"
 
@@ -385,6 +386,7 @@ def handle_kustomizations(resources_path):
         kustomization_exists = True
     else:
         kustomization_exists = False
+        os.makedirs(resources_path, exist_ok=True)
         mode = "w+"
     with open(kustomization_path, mode, encoding="utf-8") as kustomization_file:
         yaml = YAML()
@@ -445,11 +447,11 @@ def handle_kustomizations(resources_path):
 
 def process_app(path: Union[str, pathlib.Path], namespace,
                 create_pr_flag: Union[bool, None] = False,
-                prometheus=None, key=None, context=None):
+                prometheus=None, __key=None, context=None):
     if create_pr_flag is None:
         create_pr_flag = False
 
-    repo = pull_repo(key)
+    repo = pull_repo(__key)
     os.chdir(repo.working_dir)
     results = find_recommendations(path, namespace, prometheus, context=context)
     if results is None:
@@ -460,7 +462,7 @@ def process_app(path: Union[str, pathlib.Path], namespace,
     if create_pr_flag and results.score > 70:
         log.info("Score %s is above 70, not creating PR", results.score)
         create_pr_flag = False
-    pr = create_pr_func(create_pr_flag, path=path, namespace=namespace, table=tbl, key=key)
+    pr = create_pr_func(create_pr_flag, path=path, namespace=namespace, table=tbl, __key=__key)
     if create_pr_flag and not isinstance(pr, tuple):
         log.info("PR %s created. https://github.com/argyle-systems/argyle-k8s/pull/%s ",
                  pr.number, pr.number)
@@ -468,19 +470,19 @@ def process_app(path: Union[str, pathlib.Path], namespace,
         log.info("PR's content would have been %s", str(pr))
 
 
-def get_github_token(key):
-    auth = auth_github_app(key)
+def get_github_token(__key):
+    auth = auth_github_app(__key)
     gi = github.GithubIntegration(auth=auth)
     token = gi.get_access_token(45242597)
     return token
 
 
-def auth_github_app(key):
-    return github.Auth.AppAuth(717966, key)
+def auth_github_app(__key):
+    return github.Auth.AppAuth(717966, __key)
 
 
-def pull_repo(key):
-    token = get_github_token(key)
+def pull_repo(__key):
+    token = get_github_token(__key)
     app_dir = os.path.normpath(os.path.join(os.path.dirname(__file__), ".."))
     os.chdir(app_dir)
     local_path = "k8s_repo"
@@ -510,7 +512,7 @@ def build_yamls(path=None):
     subprocess.run([make, target], check=True)
 
 
-def create_pr_func(create=False, path=None, namespace=None, table=None, key=None):
+def create_pr_func(create=False, path=None, namespace=None, table=None, __key=None):
     if table is None:
         raise ValueError("Need resource table to create the PR body")
     app = ""
@@ -530,7 +532,7 @@ def create_pr_func(create=False, path=None, namespace=None, table=None, key=None
     githubconsole.print(table)
 
     report = githubconsole.export_text()
-    g = github.Github(get_github_token(key).token)
+    g = github.Github(get_github_token(__key).token)
     ghrepo = g.get_repo("argyle-systems/argyle-k8s")
     body = f'''This is an automated PR to adjust resources{f" for {app}" if app else ""}.
 {"This is created by looking at common selectors in workloads in the build output." if app else ""}
@@ -597,8 +599,8 @@ Monthly xost estimates are based on the same strategy used to adjust resources.
 
 
 def main(path: Annotated[str, typer.Argument],
-         namespace: Annotated[Optional[str], typer.Option(None)] = None,
-         create_pr: Annotated[Optional[bool], typer.Option(False)] = False,
+         namespace: Annotated[Optional[str], typer.Option()] = None,
+         create_pr: Annotated[Optional[bool], typer.Option()] = False,
          prometheus: Annotated[Optional[str], typer.Option("--prometheus", "-p")] = None,
          context: Annotated[Optional[str], typer.Option("--context", "-c")] = None
          ):
@@ -606,16 +608,16 @@ def main(path: Annotated[str, typer.Argument],
     key_file = os.environ.get("PRIVATE_KEY_FILE")
     if key_file:
         with open(key_file, "r", encoding="utf-8") as _f:
-            key = _f.read()
+            __key = _f.read()
 
     else:
-        key = os.environ.get("PRIVATE_KEY", "")
+        __key = os.environ.get("PRIVATE_KEY", "")
 
-    if not key:
+    if not __key:
         raise ValueError(
             "Private key not found, please set either PRIVATE_KEY_FILE as a "
             " path or PRIVATE_KEY with the key contents.")
-    repo = pull_repo(key)
+    repo = pull_repo(__key)
     os.chdir(repo.working_dir)
     if path in ["prod", "all"] or path.startswith(".build"):
         if path.startswith(".build"):
@@ -624,11 +626,11 @@ def main(path: Annotated[str, typer.Argument],
             build_yamls()
         for app_yaml in pathlib.Path(".build").glob("*-prod.yaml"):
             try:
-                process_app(app_yaml, namespace, create_pr, prometheus, key, context=context)
+                process_app(app_yaml, namespace, create_pr, prometheus, __key, context=context)
             except Exception:
                 log.exception("error in processing app %s", app_yaml, stack_info=True)
     else:
-        process_app(path, namespace, create_pr, prometheus, key, context=context)
+        process_app(path, namespace, create_pr, prometheus, __key, context=context)
 
 
 if __name__ == "__main__":
