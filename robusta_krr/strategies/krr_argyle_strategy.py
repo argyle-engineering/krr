@@ -4,7 +4,9 @@ import pydantic as pd
 import numpy as np
 
 import robusta_krr
-from robusta_krr.api.models import K8sObjectData, MetricsPodData, ResourceRecommendation, ResourceType, RunResult
+from robusta_krr.api.models import (
+    K8sObjectData, MetricsPodData, ResourceRecommendation, ResourceType, RunResult
+)
 from robusta_krr.core.abstract.strategies import (
     BaseStrategy,
     PodsTimeData,
@@ -18,7 +20,41 @@ from robusta_krr.core.integrations.prometheus.metrics import (
 )
 from robusta_krr.strategies.simple import SimpleStrategySettings
 
-from robusta_krr.core.integrations.prometheus.metrics.base import PrometheusMetric, QueryType
+from robusta_krr.core.integrations.prometheus.metrics.base import QueryType
+from robusta_krr.utils.resource_units import parse
+
+
+def SecondaryPercentileCPULoader(percentile: float) -> type[PrometheusMetric]:
+    """
+    A factory for creating percentile CPU usage metric loaders.
+    """
+
+    if not 0 <= percentile <= 100:
+        raise ValueError("percentile must be between 0 and 100")
+
+    class SecondaryPercentileCPULoader(PrometheusMetric):
+        def get_query(self, object: K8sObjectData, duration: str, step: str) -> str:
+            pods_selector = "|".join(pod.name for pod in object.pods)
+            cluster_label = self.get_prometheus_cluster_label()
+            return f"""
+                quantile_over_time(
+                    {round(percentile / 100, 2)},
+                    max(
+                        rate(
+                            container_cpu_usage_seconds_total{{
+                                namespace="{object.namespace}",
+                                pod=~"{pods_selector}",
+                                container="{object.container}"
+                                {cluster_label}
+                            }}[{step}]
+                        )
+                    ) by (container, pod, job)
+                    [{duration}:{step}]
+                )
+            """
+
+    return SecondaryPercentileCPULoader
+
 
 class OOMKilledLoader(PrometheusMetric):
     """
@@ -54,6 +90,11 @@ class ArgyleStrategySettings(SimpleStrategySettings):
 
         return np.max(data_)
 
+    secondary_cpu_percentile: float = pd.Field(
+        50, gt=0, description="The percentile to use for the secondary CPU usage metric."
+    )
+
+
 class ArgyleStrategy(BaseStrategy[ArgyleStrategySettings]):
     """
     A custom strategy that uses the provided parameters for CPU and memory.
@@ -64,14 +105,17 @@ class ArgyleStrategy(BaseStrategy[ArgyleStrategySettings]):
 
     @staticmethod
     def info_from_list(info_list: list[str]):
+        '''Helper function to join a list of strings into a single string'''
+
         if len(info_list) == 0:
             return None
         return ", ".join(info_list)
 
     @property
     def metrics(self) -> list[type[PrometheusMetric]]:
-        return [PercentileCPULoader(self.settings.cpu_percentile), MaxMemoryLoader, CPUAmountLoader, MemoryAmountLoader, 
-                OOMKilledLoader,
+        return [PercentileCPULoader(self.settings.cpu_percentile), MaxMemoryLoader,
+                CPUAmountLoader, MemoryAmountLoader, OOMKilledLoader,
+                SecondaryPercentileCPULoader(self.settings.secondary_cpu_percentile),
         ]
 
     def _calculate_cpu_limit(self, cpu_recommended: float):
@@ -93,7 +137,10 @@ class ArgyleStrategy(BaseStrategy[ArgyleStrategySettings]):
     def __calculate_cpu_proposal(
         self, history_data: MetricsPodData, object_data: K8sObjectData
     ) -> ResourceRecommendation:
-        data = history_data["PercentileCPULoader"]
+        if object_data.kind == "DaemonSet":
+            data = history_data["SecondaryPercentileCPULoader"]
+        else:
+            data = history_data["PercentileCPULoader"]
 
         if len(data) == 0:
             return ResourceRecommendation.undefined(info="No data")
@@ -143,17 +190,38 @@ class ArgyleStrategy(BaseStrategy[ArgyleStrategySettings]):
         if history_data.get("OOMKilledLoader", None):
             info.append("Container has been OOMKilled in the period")
             # if OOMKilled consider usage = limit
-            memory_usage = object_data.allocations.limits.get("memory")
+            memory_usage = object_data.allocations.limits.get(ResourceType.Memory)
         else:
             memory_usage = self.settings.calculate_memory_usage(filtered_data)
 
-        strategy = object_data.annotations.get("argyle-krr-memory-strategy", "default")
-        if strategy == "default":
+        strategy =  (
+            object_data.annotations.get("argyle-krr-memory-strategy", "default") if
+            object_data.annotations else "default"
+        )
+        min_memory_limit = (
+            object_data.annotations.get("argyle-krr-memory-limit-min", None) if
+            object_data.annotations else None
+        )
+        memory_limit = None
+
+        if min_memory_limit and isinstance(min_memory_limit, str):
+            min_memory_limit = parse(min_memory_limit)
+
+        if strategy == "default" and isinstance(memory_usage, float):
             memory_request = memory_usage
             memory_limit = memory_usage * (1 + self.settings.memory_buffer_percentage / 100 )
-        if strategy == "guaranteed":
+        elif strategy == "guaranteed" and isinstance(memory_usage, float):
             memory_request = memory_usage * (1 + self.settings.memory_buffer_percentage / 100 )
             memory_limit = memory_usage * (1 + self.settings.memory_buffer_percentage / 100 )
+        else:
+            print("Invalid memory strategy, using default")
+            memory_request = memory_usage
+            memory_limit = memory_usage * (1 + self.settings.memory_buffer_percentage / 100 )
+
+        if isinstance(min_memory_limit, float) and memory_limit and memory_limit < min_memory_limit:
+            memory_limit = min_memory_limit
+            if strategy == "guaranteed":
+                memory_request = min_memory_limit
 
         info = self.info_from_list(info)
         return ResourceRecommendation(request=memory_request, limit=memory_limit, info=info)

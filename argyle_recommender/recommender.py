@@ -106,6 +106,16 @@ def get_krr_json(label, namespace="*", prometheus=None, context=None, app_name=N
         except json.JSONDecodeError:
             log.error(krr[:300])
             raise
+    if results is None:
+        krr = subprocess.run(command, capture_output=True, encoding="utf8", check=True).stdout
+        try:
+            results = json.loads(krr)
+        except json.JSONDecodeError:
+            try:
+                krr = subprocess.run(command, capture_output=True, encoding="utf8", check=True).stdout
+            except json.JSONDecodeError:
+                log.error(krr[:300])
+                raise
     assert results
     try:
         results = Result(**results)
@@ -146,7 +156,8 @@ def find_recommendations(build_yaml_path, namespace, prometheus, context=None):
             if namespace is None:
                 namespace = doc["metadata"].get("namespace", "*")
             results = get_krr_json(
-                f"{label_name}={label}", namespace, prometheus, app_name=app_name)
+                f"{label_name}={label}", namespace, prometheus,
+                app_name=app_name, context=context)
             if len(results.scans) == 0:
                 docs.pop(0)
                 continue
