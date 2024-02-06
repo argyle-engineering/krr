@@ -130,7 +130,7 @@ class ClusterLoader:
         
         annotations = []
         if item.metadata.annotations:
-            labels = item.metadata.annotations
+            annotations = item.metadata.annotations
 
         obj = K8sObjectData(
             cluster=self.cluster,

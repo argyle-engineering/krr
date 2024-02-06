@@ -214,7 +214,6 @@ class ArgyleStrategy(BaseStrategy[ArgyleStrategySettings]):
             memory_request = memory_usage * (1 + self.settings.memory_buffer_percentage / 100 )
             memory_limit = memory_usage * (1 + self.settings.memory_buffer_percentage / 100 )
         else:
-            print("Invalid memory strategy, using default")
             memory_request = memory_usage
             memory_limit = memory_usage * (1 + self.settings.memory_buffer_percentage / 100 )
 

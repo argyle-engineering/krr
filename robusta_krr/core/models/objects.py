@@ -90,7 +90,7 @@ class K8sObjectData(pd.BaseModel):
                 kind=self.kind,
                 allocations=self.allocations,
                 labels=self.labels,
-                annotations=self.labels,
+                annotations=self.annotations,
             )
             for batch in batched(self.pods, n)
         ]
