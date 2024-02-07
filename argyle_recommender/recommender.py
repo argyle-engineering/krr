@@ -26,7 +26,7 @@ from rich.console import Console
 import git
 
 
-from robusta_krr.formatters.table import table, NONE_LITERAL, NAN_LITERAL
+from robusta_krr.formatters.table import table, NAN_LITERAL
 from robusta_krr.core.models.result import Result
 from robusta_krr.utils import resource_units
 
@@ -73,7 +73,7 @@ log = structlog.get_logger()
 
 def _format(value):
     if value is None:
-        return NONE_LITERAL
+        return ""
     elif isinstance(value, str):
         return NAN_LITERAL
     else:
