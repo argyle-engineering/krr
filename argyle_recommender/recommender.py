@@ -31,6 +31,14 @@ from robusta_krr.core.models.result import Result
 from robusta_krr.utils import resource_units
 
 WORKLOADS = ["Deployment", "Rollout", "Job", "DaemonSet", "StatefulSet", "CronJob"]
+WORKLOADS_MAP = {
+    "deployment": "Deployment",
+    "rollout": "Rollout",
+    "job": "Job",
+    "daemonset": "DaemonSet",
+    "statefulset": "StatefulSet",
+    "cronjob": "CronJob",
+}
 console = Console(width=500)
 githubconsole = Console(record=True, no_color=True, width=500)
 
@@ -279,7 +287,7 @@ def create_resource_transformers(results: Result, path: Union[str, pathlib.Path]
                     **_recommended_to_resources(scan.recommended),
                     "workload" : name,
                     "container": container,
-                    "kind": kind.title()
+                    "kind": WORKLOADS_MAP[kind]
                 }
                 transformer["resourceQuotas"] = [
                     r for r in transformer["resourceQuotas"] if r["container"] != container]
