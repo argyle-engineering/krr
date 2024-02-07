@@ -38,8 +38,8 @@ RUN curl -sLo ksops.tar.gz https://github.com/argyle-engineering/ksops/releases/
 RUN curl -s "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh" | bash -s - 5.1.0 $HOME/go/bin/ 
 RUN --mount=type=secret,id=GITHUB_TOKEN \
     export GH_TOKEN=$(cat /run/secrets/GITHUB_TOKEN) \
-    && gh release download --clobber -R "argyle-systems/argyle-resource-quota-transformer" --pattern "argyle-resource-quota-transformer_Linux_x86_64.tar.gz" -D "/tmp" \
-    && tar -xzf "/tmp/argyle-resource-quota-transformer_Linux_x86_64.tar.gz" -C "/tmp" \
+    && gh release download --clobber -R "argyle-systems/argyle-resource-quota-transformer" --pattern "argyle-resource-quota-transformer_linux_x86_64.tar.gz" -D "/tmp" \
+    && tar -xzf "/tmp/argyle-resource-quota-transformer_linux_x86_64.tar.gz" -C "/tmp" \
     && mv "/tmp/argyle-resource-quota-transformer" "/root/go/bin"
 RUN --mount=type=secret,id=GITHUB_TOKEN \
     export GH_TOKEN=$(cat /run/secrets/GITHUB_TOKEN) \
