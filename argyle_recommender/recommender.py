@@ -125,10 +125,11 @@ def get_krr_json(label, namespace="*", prometheus=None, context=None, app_name=N
     return results
 
 
-def find_recommendations(build_yaml_path, namespace, prometheus, context=None):
+def find_recommendations(build_yaml_path, namespace_flag, prometheus, context=None):
     scans = []
     results = None
     if build_yaml_path == "no-selector":
+        namespace = namespace_flag
         return get_krr_json("no-selector", namespace=namespace,
                             prometheus=prometheus, context=context)
 
@@ -153,8 +154,10 @@ def find_recommendations(build_yaml_path, namespace, prometheus, context=None):
             if label is None:
                 label_name = next(iter(labels))
                 label = labels.get(label_name)
-            if namespace is None:
+            if namespace_flag is None:
                 namespace = doc["metadata"].get("namespace", "*")
+            else:
+                namespace = namespace_flag
             results = get_krr_json(
                 f"{label_name}={label}", namespace, prometheus,
                 app_name=app_name, context=context)
