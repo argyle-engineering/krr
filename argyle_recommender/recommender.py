@@ -400,7 +400,7 @@ def estimate_cost(cpu, ram):
     return (cpu_cost, ram_cost, node_cost_fraction)
 
 
-def handle_kustomizations(resources_path):
+def handle_kustomizations(resources_path: str):
     kustomization_path = pathlib.Path(f"{resources_path}/kustomization.yaml")
 
     mode = "r+"
@@ -459,8 +459,11 @@ def handle_kustomizations(resources_path):
         components = (
             parent_kustomization["components"] if
             "components" in parent_kustomization else [])
-        components = [c for c in components if c != kustomization_path.parent.name]
-        components.append(kustomization_path.parent.name)
+        resources = kustomization_path.parent.name
+        if "scanners" in resources_path:
+            resources = "../resources"
+        components = [c for c in components if c != resources]
+        components.append(resources)
         parent_kustomization["components"] = components
         yaml.dump(parent_kustomization, parent_kustomization_file)
         parent_kustomization_file.truncate()
