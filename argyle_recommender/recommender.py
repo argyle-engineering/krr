@@ -517,7 +517,7 @@ def pull_repo(__key):
 
     if os.path.isdir(local_path):
         repo = git.Repo(local_path)
-        repo.head.reset()
+        repo.head.reset(working_tree=True)
         repo.heads.master.checkout()
 
     else:
