@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 
+from distutils.command import clean
 import os
 import platform
 import pathlib
@@ -246,7 +247,7 @@ def create_resource_transformers(results: Result, path: Union[str, pathlib.Path]
             app_path = "scanners"
 
         transformer_path = pathlib.Path(
-            f"namespaces/{app_path}/resources/{name}-{kind}-resourcetransformer.yaml"
+            f"namespaces/{app_path}/resources/{app_path}-resourcetransformer.yaml"
         )
 
         mode = "r+"
@@ -271,7 +272,7 @@ def create_resource_transformers(results: Result, path: Union[str, pathlib.Path]
                     "apiVersion": "argyle.com/v1",
                     "kind": "ResourceQuotaTransformer",
                     "metadata": {
-                        "name": f"{name}-{kind}",
+                        "name": f"{app_path}-{kind}",
                         "annotations": {
                             "config.kubernetes.io/function":
                             LiteralScalarString('''exec:
@@ -290,7 +291,9 @@ def create_resource_transformers(results: Result, path: Union[str, pathlib.Path]
                     "kind": WORKLOADS_MAP[kind]
                 }
                 transformer["resourceQuotas"] = [
-                    r for r in transformer["resourceQuotas"] if r["container"] != container]
+                    r for r in transformer["resourceQuotas"] if not (
+                        r["container"] == container and r["workload"] == name
+                        and r["kind"] == WORKLOADS_MAP[kind])]
                 transformer["resourceQuotas"].append(resource_quota)
             except TypeError as e:
                 log.error("%s/%s/%s/%s", kind, namespace, name, container)
@@ -472,7 +475,8 @@ def handle_kustomizations(resources_path: str):
 
 def process_app(path: Union[str, pathlib.Path], namespace,
                 create_pr_flag: Union[bool, None] = False,
-                prometheus=None, __key=None, context=None):
+                prometheus=None, __key=None, context=None,
+                clean_resources_flag: bool = False):
     if create_pr_flag is None:
         create_pr_flag = False
 
@@ -481,6 +485,8 @@ def process_app(path: Union[str, pathlib.Path], namespace,
     results = find_recommendations(path, namespace, prometheus, context=context)
     if results is None:
         return None
+    if clean_resources_flag:
+        clean_resources(path)
     create_resource_transformers(results, path)
     tbl = table(results)
     total_estimate_in_table(tbl, results)
@@ -573,7 +579,7 @@ Monthly xost estimates are based on the same strategy used to adjust resources.
     pr_title = f"Adjusting {f'{app} ' if app else ''}resources acording to usage"
 
     if create:
-        repo.index.add(["namespaces"])
+        repo.git.add(["namespaces"])
     if create and repo.is_dirty():
         try:
             # check if remote branch exists
@@ -622,13 +628,28 @@ Monthly xost estimates are based on the same strategy used to adjust resources.
             log.info("No changes to be made%s.", f' to {app}' if app else '')
         return (pr_title, body, branch_name)
 
+def clean_resources(app_path):
+    """Function to delete all resources transformers before creating new ones"""
+    app_path = app_path.name.replace("-prod.yaml", "").replace("-dev.yaml", "")
+    if app_path.startswith("scanners-application-"):
+        app_path = "scanners"
+    app_path = f"namespaces/{app_path}/resources"
+    if not os.path.isdir(app_path):
+        return None # nothing to clean
+    for file in os.listdir(app_path):
+        if "resourcetransformer.yaml" in file:
+            os.remove(os.path.join(app_path, file))
+        if "kustomization.yaml" in file:
+            os.remove(os.path.join(app_path, file))
+
 
 def main(path: Annotated[str, typer.Argument],
          namespace: Annotated[Optional[str], typer.Option()] = None,
          create_pr: Annotated[Optional[bool], typer.Option()] = False,
          prometheus: Annotated[Optional[str], typer.Option("--prometheus", "-p")] = None,
          context: Annotated[Optional[str], typer.Option("--context", "-c")] = None,
-         incluster: Annotated[Optional[bool], typer.Option("--incluster")] = False
+         incluster: Annotated[Optional[bool], typer.Option("--incluster")] = False,
+         clean_resources_flag: Annotated[bool, typer.Option("--clean-resources")] = False
          ):
 
     key_file = os.environ.get("PRIVATE_KEY_FILE")
@@ -654,11 +675,13 @@ def main(path: Annotated[str, typer.Argument],
             if context is None and not incluster:
                 context = app_yaml.name.replace(".yaml", "").split("-")[-1]
             try:
-                process_app(app_yaml, namespace, create_pr, prometheus, __key, context=context)
+                process_app(app_yaml, namespace, create_pr, prometheus, __key, context=context,
+                            clean_resources_flag=clean_resources_flag)
             except Exception:
                 log.exception("error in processing app %s", app_yaml, stack_info=True)
     else:
-        process_app(path, namespace, create_pr, prometheus, __key, context=context)
+        process_app(path, namespace, create_pr, prometheus, __key, context=context,
+                    clean_resources_flag=clean_resources_flag)
 
 
 if __name__ == "__main__":
