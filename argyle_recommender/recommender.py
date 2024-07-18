@@ -235,7 +235,7 @@ def _recommended_to_resources(recommended):
 def create_resource_transformers(results: Result, path: Union[str, pathlib.Path]) -> None:
     path = pathlib.Path(path)
     app_path = ""
-    app_path = path.name.replace("-prod.yaml", "")
+    app_path = path.name.replace("-prod.yaml", "").replace("-dev.yaml", "")
     for scan in results.scans:
         kind = scan.object.kind.lower()
         name = scan.object.name
@@ -627,7 +627,8 @@ def main(path: Annotated[str, typer.Argument],
          namespace: Annotated[Optional[str], typer.Option()] = None,
          create_pr: Annotated[Optional[bool], typer.Option()] = False,
          prometheus: Annotated[Optional[str], typer.Option("--prometheus", "-p")] = None,
-         context: Annotated[Optional[str], typer.Option("--context", "-c")] = None
+         context: Annotated[Optional[str], typer.Option("--context", "-c")] = None,
+         incluster: Annotated[Optional[bool], typer.Option("--incluster")] = False
          ):
 
     key_file = os.environ.get("PRIVATE_KEY_FILE")
@@ -649,7 +650,9 @@ def main(path: Annotated[str, typer.Argument],
             build_yamls(path)
         else:
             build_yamls()
-        for app_yaml in pathlib.Path(".build").glob("*-prod.yaml"):
+        for app_yaml in pathlib.Path(".build").glob("*.yaml"):
+            if context is None and not incluster:
+                context = app_yaml.name.replace(".yaml", "").split("-")[-1]
             try:
                 process_app(app_yaml, namespace, create_pr, prometheus, __key, context=context)
             except Exception:
