@@ -559,7 +559,7 @@ def create_pr_func(create=False, path=None, namespace=None, table=None, __key=No
 
     author = git.Actor("Argyle KRR recommender", "infrastructure+krrrecommender@argyle.com")
     branch_name = f"krr-recommender-{branch_suffix}"
-    commit_msg = f"Adjusting resources acording to usage{f' for app {app}' if app else f' for namespace {namespace}' if namespace else ''}."
+    commit_msg = f"Adjusting resources according to usage{f' for app {app}' if app else f' for namespace {namespace}' if namespace else ''}."
     githubconsole.print(table)
 
     report = githubconsole.export_text()
