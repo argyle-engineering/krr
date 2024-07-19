@@ -570,13 +570,13 @@ def create_pr_func(create=False, path=None, namespace=None, table=None, __key=No
 {f"This is created by looking at all workloads in the namespace {namespace}." if namespace else ""}
 
 Resources recommendations are based on usage and paramaters that can be fine tuned.
-Monthly xost estimates are based on the same strategy used to adjust resources.
+Monthly cost estimates are based on the same strategy used to adjust resources.
 
 ```
 {report}
 ```
     '''
-    pr_title = f"Adjusting {f'{app} ' if app else ''}resources acording to usage"
+    pr_title = f"Adjusting {f'{app} ' if app else ''}resources according to usage"
 
     if create:
         repo.git.add(["namespaces"])
