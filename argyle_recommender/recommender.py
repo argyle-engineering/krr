@@ -152,6 +152,9 @@ def find_recommendations(build_yaml_path, namespace_flag, prometheus, context=No
             doc = docs[0]
             app_name = doc["metadata"].get("name")
             labels = doc["metadata"].get("labels")
+            if labels is None:
+                log.error("No labels found in workload %s", doc["metadata"]["name"])
+                continue
             label = None
             label_name = None
             for label_name in [
@@ -473,6 +476,28 @@ def handle_kustomizations(resources_path: str):
         parent_kustomization_file.seek(0)
 
 
+
+def _should_create_pr(results: Result, create_pr_flag: bool, clean_resources_flag: bool):
+    for scan in results.scans:
+        if "OOMKilled" in scan.recommended.info:
+            log.info("OOMKilled found, creating PR")
+            create_pr_flag = True
+            return True
+        if scan.severity == "CRITICAL":
+            log.info("Critical severity found, creating PR")
+            create_pr_flag = True
+            return True
+    if create_pr_flag and results.score > 70:
+        if clean_resources_flag:
+            log.info("Score %s is above 70, creating PR to clean old transformers", results.score)
+            return True
+        else:
+            log.info("Score %s is above 70, not creating PR", results.score)
+            return False
+    else:
+        return False
+
+
 def process_app(path: Union[str, pathlib.Path], namespace,
                 create_pr_flag: Union[bool, None] = False,
                 prometheus=None, __key=None, context=None,
@@ -490,9 +515,7 @@ def process_app(path: Union[str, pathlib.Path], namespace,
     create_resource_transformers(results, path)
     tbl = table(results)
     total_estimate_in_table(tbl, results)
-    if create_pr_flag and results.score > 70:
-        log.info("Score %s is above 70, not creating PR", results.score)
-        create_pr_flag = False
+    create_pr_flag = _should_create_pr(results, create_pr_flag, clean_resources_flag)
     pr = create_pr_func(create_pr_flag, path=path, namespace=namespace, table=tbl, __key=__key)
     if create_pr_flag and not isinstance(pr, tuple):
         log.info("PR %s created. https://github.com/argyle-systems/argyle-k8s/pull/%s ",

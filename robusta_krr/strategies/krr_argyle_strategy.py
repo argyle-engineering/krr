@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 
-import pydantic as pd
+import json
+from typing import Union, Optional
+
 import numpy as np
+import pydantic as pd
+from pydantic import BaseModel
 
 import robusta_krr
 from robusta_krr.api.models import (
@@ -76,6 +80,34 @@ class OOMKilledLoader(PrometheusMetric):
                         }}
                 )
         """
+
+
+class ContainerMinResources(BaseModel):
+    cpu: Optional[Union[float, int]]
+    memory: Optional[Union[float, int]]
+
+    @pd.validator("cpu", "memory", pre=True)
+    def _parse(cls, value: Optional[Union[float, int, str]]) -> Optional[Union[float, int]]:
+        if value is None:
+            return None
+        if isinstance(value, (float, int)):
+            return value
+        if isinstance(value, str):
+            return parse(value)
+        return value
+
+
+class ContainerConfig(BaseModel):
+    container: str
+    min_requests: Optional[ContainerMinResources]
+    min_limits: Optional[ContainerMinResources]
+
+
+class Config(BaseModel):
+    containers : dict[str, ContainerConfig]
+    memory_strategy: Optional[str] = "default"
+    cpu_strategy: Optional[str] = "default"
+
 
 # Providing description to the settings will make it available in the CLI help
 class ArgyleStrategySettings(SimpleStrategySettings):
@@ -165,6 +197,25 @@ class ArgyleStrategy(BaseStrategy[ArgyleStrategySettings]):
         cpu_limit = (self._calculate_cpu_limit(cpu_usage))
         return ResourceRecommendation(request=cpu_usage, limit=cpu_limit, info=info)
 
+
+    def _get_config(self, object_data: K8sObjectData) -> tuple[Config, list[str]]:
+        config = object_data.annotations.get("config.alpha.argyle.io/krr-config", None)
+        info = []
+        if config is not None:
+            try:
+                config = json.loads(config)
+                config = Config(**config)
+            except json.JSONDecodeError:
+                config = None
+                info.append("Failed to parse krr-config annotation as json")
+            except pd.ValidationError as e:
+                config = None
+                info.append(f"Invalid krr-config annotation {e=}")
+        else:
+            config = Config(containers=[])
+        return (config, info)
+
+
     def __calculate_memory_proposal(
         self, history_data: MetricsPodData, object_data: K8sObjectData
     ) -> ResourceRecommendation:
@@ -182,7 +233,7 @@ class ArgyleStrategy(BaseStrategy[ArgyleStrategySettings]):
         if len(filtered_data) == 0:
             return ResourceRecommendation.undefined(info="Not enough data")
 
-        info = []
+        config, info = self._get_config(object_data)
         if object_data.hpa is not None and object_data.hpa.target_memory_utilization_percentage is not None:
             info.append("Memory utilization HPA detected, be wary of ever increasing recommendations")
 
@@ -190,22 +241,20 @@ class ArgyleStrategy(BaseStrategy[ArgyleStrategySettings]):
         if history_data.get("OOMKilledLoader", None):
             info.append("Container has been OOMKilled in the period")
             # if OOMKilled consider usage = limit
-            memory_usage = object_data.allocations.limits.get(ResourceType.Memory)
+            memory_usage = object_data.allocations.limits.get(ResourceType.Memory) * (1 + self.settings.memory_buffer_percentage / 100 )
         else:
             memory_usage = self.settings.calculate_memory_usage(filtered_data)
 
-        strategy =  (
-            object_data.annotations.get("argyle-krr-memory-strategy", "default") if
-            object_data.annotations else "default"
-        )
-        min_memory_limit = (
-            object_data.annotations.get("argyle-krr-memory-limit-min", None) if
-            object_data.annotations else None
-        )
-        memory_limit = None
+        strategy = config.memory_strategy
 
-        if min_memory_limit and isinstance(min_memory_limit, str):
-            min_memory_limit = parse(min_memory_limit)
+        min_memory_limit = None
+        min_memory_request = None
+        container_config = config.containers.get(object_data.container, None)
+        if container_config is not None:
+            min_memory_limit = container_config.min_limits.memory
+            min_memory_request = container_config.min_requests.memory
+
+        memory_limit = None
 
         if strategy == "default" and isinstance(memory_usage, float):
             memory_request = memory_usage
@@ -217,10 +266,13 @@ class ArgyleStrategy(BaseStrategy[ArgyleStrategySettings]):
             memory_request = memory_usage
             memory_limit = memory_usage * (1 + self.settings.memory_buffer_percentage / 100 )
 
-        if isinstance(min_memory_limit, float) and memory_limit and memory_limit < min_memory_limit:
+        if min_memory_limit and memory_limit < min_memory_limit:
             memory_limit = min_memory_limit
             if strategy == "guaranteed":
                 memory_request = min_memory_limit
+
+        if min_memory_request and memory_request < min_memory_request:
+            memory_request = min_memory_request
 
         info = self.info_from_list(info)
         return ResourceRecommendation(request=memory_request, limit=memory_limit, info=info)
