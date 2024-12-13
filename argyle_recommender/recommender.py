@@ -29,6 +29,7 @@ import git
 
 from robusta_krr.formatters.table import table, NAN_LITERAL
 from robusta_krr.core.models.result import Result
+from robusta_krr.core.models.config import Config
 from robusta_krr.utils import resource_units
 
 WORKLOADS = ["Deployment", "Rollout", "Job", "DaemonSet", "StatefulSet", "CronJob"]
@@ -127,10 +128,16 @@ def get_krr_json(label, namespace="*", prometheus=None, context=None, app_name=N
                 raise
     assert results
     try:
+        results["config"]["resources"] = []
+        results["config"]["show_cluster_name"] = True
+        config = Config(**results["config"])
+        Config.set_config(config)
+
         results = Result(**results)
     except Exception as e:
-        log.error(results)
-        log.error(e)
+        log.info(results)
+        log.exception("Error in parsing results", stack_info=True)
+        raise e
     return results
 
 
@@ -152,6 +159,13 @@ def find_recommendations(build_yaml_path, namespace_flag, prometheus, context=No
             doc = docs[0]
             app_name = doc["metadata"].get("name")
             labels = doc["metadata"].get("labels")
+            if labels is None:
+                # TODO: add a dummy result with info error so it shows up in the table
+                log.warning("No labels found for %s. Please add an app label",
+                            doc["metadata"]["name"])
+                docs.pop(0)
+                continue
+
             label = None
             label_name = None
             for label_name in [
@@ -649,7 +663,8 @@ def main(path: Annotated[str, typer.Argument],
          prometheus: Annotated[Optional[str], typer.Option("--prometheus", "-p")] = None,
          context: Annotated[Optional[str], typer.Option("--context", "-c")] = None,
          incluster: Annotated[Optional[bool], typer.Option("--incluster")] = False,
-         clean_resources_flag: Annotated[bool, typer.Option("--clean-resources")] = False
+         clean_resources_flag: Annotated[bool, typer.Option("--clean-resources")] = False,
+         debug: Annotated[bool, typer.Option("--debug")] = False,
          ):
 
     key_file = os.environ.get("PRIVATE_KEY_FILE")

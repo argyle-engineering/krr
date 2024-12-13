@@ -59,6 +59,7 @@ class PrometheusMetric(BaseMetric):
     query_type: QueryType = QueryType.Query
     filtering: bool = True
     pods_batch_size: Optional[int] = 50
+    warning_on_no_data: bool = True
 
     def __init__(
         self,
@@ -117,16 +118,20 @@ class PrometheusMetric(BaseMetric):
 
     def _query_prometheus_sync(self, data: PrometheusMetricData) -> list[PrometheusSeries]:
         if data.type == QueryType.QueryRange:
-            value = self.prometheus.custom_query_range(
+            response = self.prometheus.safe_custom_query_range(
                 query=data.query,
                 start_time=data.start_time,
                 end_time=data.end_time,
                 step=data.step,
             )
-            return value
+            return response["result"]
         else:
             # regular query, lighter on preformance
-            results = self.prometheus.custom_query(query=data.query)
+            try:
+                response = self.prometheus.safe_custom_query(query=data.query)
+            except Exception as e:
+                raise ValueError(f"Failed to run query: {data.query}") from e
+            results = response["result"]
             # format the results to return the same format as custom_query_range
             for result in results:
                 result["values"] = [result.pop("value")]
@@ -165,7 +170,7 @@ class PrometheusMetric(BaseMetric):
         duration_str = self._step_to_string(period)
 
         query = self.get_query(object, duration_str, step_str)
-        end_time = datetime.datetime.now().replace(second=0, microsecond=0).astimezone()
+        end_time = datetime.datetime.utcnow().replace(second=0, microsecond=0)
         start_time = end_time - period
 
         # Here if we split the object into multiple sub-objects, we query each sub-object recursively.

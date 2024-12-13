@@ -28,7 +28,7 @@ class ResourceRecommendation(pd.BaseModel):
     request: Optional[float]
     limit: Optional[float]
     info: Optional[str] = pd.Field(
-        None, description="Additional information about the recommendation. Currently used to explain undefined."
+        None, description="Additional information about the recommendation."
     )
 
     @classmethod
@@ -58,6 +58,11 @@ class StrategySettings(pd.BaseModel):
     @property
     def timeframe_timedelta(self) -> datetime.timedelta:
         return datetime.timedelta(minutes=self.timeframe_duration)
+
+    def history_range_enough(self, history_range: tuple[datetime.timedelta, datetime.timedelta]) -> bool:
+        """Override this function to check if the history range is enough for the strategy."""
+
+        return True
 
 
 # A type alias for a numpy array of shape (N, 2).
@@ -106,24 +111,15 @@ class BaseStrategy(abc.ABC, Generic[_StrategySettings]):
         self.settings = settings
 
     def __str__(self) -> str:
-        return self._display_name.title()
-
-    @property
-    def _display_name(self) -> str:
-        return getattr(self, "display_name", self.__class__.__name__.lower().removeprefix("strategy"))
+        return self.display_name.title()
 
     @property
     def description(self) -> Optional[str]:
         """
         Generate a description for the strategy.
-        You can use the settings in the description by using the format syntax.
-        Also you can use Rich's markdown syntax to format the description.
+        You can use Rich's markdown syntax to format the description.
         """
-
-        if self.__doc__ is None:
-            return None
-
-        return f"[b]{self} Strategy[/b]\n\n" + dedent(self.__doc__.format_map(self.settings.dict())).strip()
+        raise NotImplementedError()
 
     # Abstract method that needs to be implemented by subclass.
     # This method is intended to calculate resource recommendation based on history data and kubernetes object data.

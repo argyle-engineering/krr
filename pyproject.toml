@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "robusta-krr"
-version = "1.6.0-dev"
+version = "1.8.2-dev"
 description = "Robusta's Resource Recommendation engine for Kubernetes"
 authors = ["Pavel Zhukov <33721692+LeaveMyYard@users.noreply.github.com>"]
 license = "MIT"
@@ -23,16 +23,24 @@ plugins = "numpy.typing.mypy_plugin,pydantic.mypy"
 krr = "robusta_krr.main:run"
 
 [tool.poetry.dependencies]
-python = ">=3.9,<3.12"
+python = ">=3.9,<=3.12.3"
 typer = { extras = ["all"], version = "^0.9.0" }
-pydantic = "1.10.7"
+pydantic = "^1.10.7"
 kubernetes = "^26.1.0"
-prometheus-api-client = "^0.5.3"
-numpy = "^1.24.2"
+prometheus-api-client = "0.5.3"
+numpy = ">=1.26.4,<1.27.0"
 alive-progress = "^3.1.2"
-prometrix = "^0.1.10"
+prometrix = "0.2.0"
 slack-sdk = "^3.21.3"
-aiostream = "^0.4.5"
+pandas = "2.2.2"
+requests = "2.32.0"
+pyyaml = "6.0.1"
+typing-extensions = "4.6.0"
+idna = "3.7"
+urllib3 = "^1.26.20"
+setuptools = "^70.0.0"
+zipp = "^3.19.1"
+
 ipykernel = "^6.27.1"
 ruamel-yaml = "^0.18.5"
 pygithub = "^2.1.1"

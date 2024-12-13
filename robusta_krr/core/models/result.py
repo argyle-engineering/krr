@@ -8,6 +8,7 @@ from robusta_krr.core.abstract import formatters
 from robusta_krr.core.models.allocations import RecommendationValue, ResourceAllocations, ResourceType
 from robusta_krr.core.models.objects import K8sObjectData
 from robusta_krr.core.models.severity import Severity
+from robusta_krr.core.models.config import Config
 
 
 class Recommendation(pd.BaseModel):
@@ -16,8 +17,8 @@ class Recommendation(pd.BaseModel):
 
 
 class ResourceRecommendation(pd.BaseModel):
-    requests: dict[ResourceType, Recommendation]
-    limits: dict[ResourceType, Recommendation]
+    requests: dict[ResourceType, Union[RecommendationValue, Recommendation]]
+    limits: dict[ResourceType, Union[RecommendationValue, Recommendation]]
     info: dict[ResourceType, Optional[str]]
 
 
@@ -39,6 +40,7 @@ class ResourceScan(pd.BaseModel):
 
                 current_severity = Severity.calculate(current, recommended, resource_type)
 
+                #TODO: consider... changing field after model created doesn't validate it.
                 getattr(recommendation_processed, selector)[resource_type] = Recommendation(
                     value=recommended, severity=current_severity
                 )
@@ -63,6 +65,9 @@ class Result(pd.BaseModel):
     resources: list[str] = ["cpu", "memory"]
     description: Optional[str] = None
     strategy: StrategyData
+    errors: list[dict[str, Any]] = pd.Field(default_factory=list)
+    clusterSummary: dict[str, Any] = {}
+    config: Optional[Config] = pd.Field(default_factory=Config.get_config)
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)

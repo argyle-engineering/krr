@@ -1,7 +1,7 @@
 import abc
 import datetime
 from concurrent.futures import ThreadPoolExecutor
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 
 from kubernetes.client.api_client import ApiClient
 
@@ -27,13 +27,17 @@ class MetricsService(abc.ABC):
     def check_connection(self):
         ...
 
-    @property
-    def name(self) -> str:
-        classname = self.__class__.__name__
+    @classmethod
+    def name(cls) -> str:
+        classname = cls.__name__
         return classname.replace("MetricsService", "") if classname != MetricsService.__name__ else classname
 
     @abc.abstractmethod
     def get_cluster_names(self) -> Optional[List[str]]:
+        ...
+
+    @abc.abstractmethod
+    async def get_cluster_summary(self) -> Dict[str, Any]:
         ...
 
     @abc.abstractmethod

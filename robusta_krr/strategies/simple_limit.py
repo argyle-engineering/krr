@@ -18,14 +18,15 @@ from robusta_krr.core.integrations.prometheus.metrics import (
     CPUAmountLoader,
     MaxMemoryLoader,
     MemoryAmountLoader,
-    PercentileCPULoader,
+    CPULoader,
     PrometheusMetric,
     MaxOOMKilledMemoryLoader,
 )
 
 
-class SimpleStrategySettings(StrategySettings):
-    cpu_percentile: float = pd.Field(95, gt=0, le=100, description="The percentile to use for the CPU recommendation.")
+class SimpleLimitStrategySettings(StrategySettings):
+    cpu_request: float = pd.Field(66, gt=0, le=100, description="The percentile to use for the CPU request.")
+    cpu_limit: float = pd.Field(96, gt=0, le=100, description="The percentile to use for the CPU limit.")
     memory_buffer_percentage: float = pd.Field(
         15, gt=0, description="The percentage of added buffer to the peak memory usage for memory recommendation."
     )
@@ -54,7 +55,7 @@ class SimpleStrategySettings(StrategySettings):
             max_oomkill * (1 + self.oom_memory_buffer_percentage / 100),
         )
 
-    def calculate_cpu_proposal(self, data: PodsTimeData) -> float:
+    def calculate_cpu_percentile(self, data: PodsTimeData, percentile: float) -> float:
         if len(data) == 0:
             return float("NaN")
 
@@ -63,22 +64,22 @@ class SimpleStrategySettings(StrategySettings):
         else:
             data_ = list(data.values())[0][:, 1]
 
-        return np.max(data_)
+        return np.percentile(data_, percentile)
 
     def history_range_enough(self, history_range: tuple[timedelta, timedelta]) -> bool:
         start, end = history_range
         return (end - start) >= timedelta(hours=3)
 
 
-class SimpleStrategy(BaseStrategy[SimpleStrategySettings]):
-    
-    display_name = "simple"
+class SimpleLimitStrategy(BaseStrategy[SimpleLimitStrategySettings]):
+
+    display_name = "simple_limit"
     rich_console = True
 
     @property
     def metrics(self) -> list[type[PrometheusMetric]]:
         metrics = [
-            PercentileCPULoader(self.settings.cpu_percentile),
+            CPULoader,
             MaxMemoryLoader,
             CPUAmountLoader,
             MemoryAmountLoader,
@@ -92,28 +93,28 @@ class SimpleStrategy(BaseStrategy[SimpleStrategySettings]):
     @property
     def description(self):
         s = textwrap.dedent(f"""\
-            CPU request: {self.settings.cpu_percentile}% percentile, limit: unset
+            CPU request: {self.settings.cpu_request}% percentile, limit: {self.settings.cpu_limit}% percentile
             Memory request: max + {self.settings.memory_buffer_percentage}%, limit: max + {self.settings.memory_buffer_percentage}%
             History: {self.settings.history_duration} hours
             Step: {self.settings.timeframe_duration} minutes
 
-            All parameters can be customized. For example: `krr simple --cpu_percentile=90 --memory_buffer_percentage=15 --history_duration=24 --timeframe_duration=0.5`
+            All parameters can be customized. For example: `krr simple_limit --cpu_request=66 --cpu_limit=96 --memory_buffer_percentage=15 --history_duration=24 --timeframe_duration=0.5`
             """)
-        
+
         if not self.settings.allow_hpa:
             s += "\n" + textwrap.dedent(f"""\
                 This strategy does not work with objects with HPA defined (Horizontal Pod Autoscaler).
                 If HPA is defined for CPU or Memory, the strategy will return "?" for that resource.
                 You can override this behaviour by passing the --allow-hpa flag
-                """)        
+                """)
 
         s += "\nLearn more: [underline]https://github.com/robusta-dev/krr#algorithm[/underline]"
         return s
-        
+
     def __calculate_cpu_proposal(
         self, history_data: MetricsPodData, object_data: K8sObjectData
     ) -> ResourceRecommendation:
-        data = history_data["PercentileCPULoader"]
+        data = history_data["CPULoader"]
 
         if len(data) == 0:
             return ResourceRecommendation.undefined(info="No data")
@@ -134,8 +135,9 @@ class SimpleStrategy(BaseStrategy[SimpleStrategySettings]):
         ):
             return ResourceRecommendation.undefined(info="HPA detected")
 
-        cpu_usage = self.settings.calculate_cpu_proposal(data)
-        return ResourceRecommendation(request=cpu_usage, limit=None)
+        cpu_request = self.settings.calculate_cpu_percentile(data, self.settings.cpu_request)
+        cpu_limit = self.settings.calculate_cpu_percentile(data, self.settings.cpu_limit)
+        return ResourceRecommendation(request=cpu_request, limit=cpu_limit)
 
     def __calculate_memory_proposal(
         self, history_data: MetricsPodData, object_data: K8sObjectData

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import textwrap
 
 import pydantic as pd
 import numpy as np
@@ -103,6 +104,16 @@ class ArgyleStrategy(BaseStrategy[ArgyleStrategySettings]):
     display_name = "argyle"  # The name of the strategy
     rich_console = True  # Whether to use rich console for the CLI
 
+    @property
+    def description(self):
+        s = textwrap.dedent(f"""\
+            CPU request: {self.settings.cpu_percentile}% percentile, limit: unset
+            Memory request: max + {self.settings.memory_buffer_percentage}%, limit: max + {self.settings.memory_buffer_percentage}%
+            History: {self.settings.history_duration} hours
+            Step: {self.settings.timeframe_duration} minutes
+
+            All parameters can be customized. For example: `krr simple --cpu_percentile=90 --memory_buffer_percentage=15 --history_duration=24 --timeframe_duration=0.5`
+            """)
     @staticmethod
     def info_from_list(info_list: list[str]):
         '''Helper function to join a list of strings into a single string'''

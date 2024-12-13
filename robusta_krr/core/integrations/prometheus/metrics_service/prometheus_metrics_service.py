@@ -1,14 +1,16 @@
 import asyncio
-import datetime
 import logging
+import os
 from concurrent.futures import ThreadPoolExecutor
-from typing import List, Optional
+from datetime import datetime, timedelta
+from typing import Iterable, List, Optional, Dict, Any
 
 from kubernetes.client import ApiClient
 from prometheus_api_client import PrometheusApiClientException
 from prometrix import PrometheusNotFound, get_custom_prometheus_connect
 
 from robusta_krr.core.abstract.strategies import PodsTimeData
+from robusta_krr.core.integrations import openshift
 from robusta_krr.core.models.config import settings
 from robusta_krr.core.models.objects import K8sObjectData, PodData
 from robusta_krr.utils.batched import batched
@@ -37,9 +39,10 @@ class PrometheusDiscovery(MetricsServiceDiscovery):
                 "app=prometheus,component=server",
                 "app=prometheus-server",
                 "app=prometheus-operator-prometheus",
-                "app=prometheus-msteams",
                 "app=rancher-monitoring-prometheus",
                 "app=prometheus-prometheus",
+                "app.kubernetes.io/name=prometheus,app.kubernetes.io/component=server",
+                "app=stack-prometheus",
             ]
         )
 
@@ -50,6 +53,8 @@ class PrometheusMetricsService(MetricsService):
     """
 
     service_discovery: type[MetricsServiceDiscovery] = PrometheusDiscovery
+    url_postfix: str = ""
+    additional_headers: dict[str, str] = {}
 
     def __init__(
         self,
@@ -60,10 +65,22 @@ class PrometheusMetricsService(MetricsService):
     ) -> None:
         super().__init__(api_client=api_client, cluster=cluster, executor=executor)
 
-        logger.info(f"Connecting to {self.name} for {self.cluster} cluster")
+        logger.info(f"Trying to connect to {self.name()} for {self.cluster} cluster")
 
-        self.auth_header = settings.prometheus_auth_header
+        self.auth_header = (
+            settings.prometheus_auth_header.get_secret_value() if settings.prometheus_auth_header else None
+        )
         self.ssl_enabled = settings.prometheus_ssl_enabled
+
+        if settings.openshift:
+            logging.info("Openshift flag is set, trying to load token from service account.")
+            openshift_token = openshift.load_token()
+
+            if openshift_token:
+                logging.info("Openshift token is loaded successfully.")
+                self.auth_header = self.auth_header or f"Bearer {openshift_token}"
+            else:
+                logging.warning("Openshift token is not found, trying to connect without it.")
 
         self.prometheus_discovery = self.service_discovery(api_client=self.api_client)
 
@@ -72,13 +89,15 @@ class PrometheusMetricsService(MetricsService):
 
         if not self.url:
             raise PrometheusNotFound(
-                f"{self.name} instance could not be found while scanning in {self.cluster} cluster.\n"
-                "\tTry using port-forwarding and/or setting the url manually (using the -p flag.)."
+                f"{self.name()} instance could not be found while scanning in {self.cluster} cluster."
             )
 
-        logger.info(f"Using {self.name} at {self.url} for cluster {cluster or 'default'}")
+        self.url += self.url_postfix
 
-        headers = settings.prometheus_other_headers
+        logger.info(f"Using {self.name()} at {self.url} for cluster {cluster or 'default'}")
+
+        headers = {k: v.get_secret_value() for k, v in settings.prometheus_other_headers.items()}
+        headers |= self.additional_headers
 
         if self.auth_header:
             headers |= {"Authorization": self.auth_header}
@@ -97,7 +116,19 @@ class PrometheusMetricsService(MetricsService):
 
     async def query(self, query: str) -> dict:
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(self.executor, lambda: self.prometheus.custom_query(query=query))
+        return await loop.run_in_executor(
+            self.executor,
+            lambda: self.prometheus.safe_custom_query(query=query)["result"],
+        )
+
+    async def query_range(self, query: str, start: datetime, end: datetime, step: timedelta) -> dict:
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            self.executor,
+            lambda: self.prometheus.safe_custom_query_range(
+                query=query, start_time=start, end_time=end, step=f"{step.seconds}s"
+            )["result"],
+        )
 
     def validate_cluster_name(self):
         if not settings.prometheus_cluster_label and not settings.prometheus_label:
@@ -126,19 +157,41 @@ class PrometheusMetricsService(MetricsService):
             logger.error("Labels api not present on prometheus client")
             return []
 
+    async def get_history_range(self, history_duration: timedelta) -> tuple[datetime, datetime]:
+        """
+        Get the history range from Prometheus, based on container_memory_working_set_bytes.
+        Returns:
+            float: The first history point.
+        """
+
+        now = datetime.now()
+        result = await self.query_range(
+            "max(prometheus_tsdb_head_series)",
+            start=now - history_duration,
+            end=now,
+            step=timedelta(hours=1),
+        )
+        try:
+            values = result[0]["values"]
+            start, end = values[0][0], values[-1][0]
+            return datetime.fromtimestamp(start), datetime.fromtimestamp(end)
+        except (KeyError, IndexError) as e:
+            logger.debug(f"Returned from get_history_range: {result}")
+            raise ValueError("Error while getting history range") from e
+
     async def gather_data(
         self,
         object: K8sObjectData,
         LoaderClass: type[PrometheusMetric],
-        period: datetime.timedelta,
-        step: datetime.timedelta = datetime.timedelta(minutes=30),
+        period: timedelta,
+        step: timedelta = timedelta(minutes=30),
     ) -> PodsTimeData:
         """
         ResourceHistoryData: The gathered resource history data.
         """
         logger.debug(f"Gathering {LoaderClass.__name__} metric for {object}")
 
-        metric_loader = LoaderClass(self.prometheus, self.name, self.executor)
+        metric_loader = LoaderClass(self.prometheus, self.name(), self.executor)
         data = await metric_loader.load_data(object, period, step)
 
         if len(data) == 0:
@@ -147,60 +200,150 @@ class PrometheusMetricsService(MetricsService):
             elif "Memory" in LoaderClass.__name__:
                 object.add_warning("NoPrometheusMemoryMetrics")
 
-            logger.warning(
-                f"{metric_loader.service_name} returned no {metric_loader.__class__.__name__} metrics for {object}"
-            )
+            if LoaderClass.warning_on_no_data:
+                logger.warning(
+                    f"{metric_loader.service_name} returned no {metric_loader.__class__.__name__} metrics for {object}"
+                )
 
         return data
 
-    async def load_pods(self, object: K8sObjectData, period: datetime.timedelta) -> list[PodData]:
+    async def query_and_validate(self, prom_query) -> Any:
+            result = await self.query(prom_query)
+            if len(result) != 1:
+                logger.warning(f"Error: Expected exactly one result from Prometheus query. {prom_query}")
+                return None
+
+            result_value = result[0].get("value")
+
+            # Verify that the "value" list has exactly two elements (timestamp and value)
+            if not result_value:
+                logger.warning(f"Error: Missing value in Prometheus result. {prom_query}")
+                return None
+
+            if len(result_value) != 2:
+                logger.warning(f"Error: Prometheus result values are not of expected size. {prom_query}")
+                return None
+
+            return result_value[1]
+
+    async def get_cluster_summary(self) -> Dict[str, Any]:
+        cluster_label = self.get_prometheus_cluster_label()
+
+        # use this for queries with no labels. turn ', cluster="xxx"' to 'cluster="xxx"'
+        single_cluster_label = cluster_label.replace(",", "")
+        memory_query = f"""
+            sum(max by (instance) (machine_memory_bytes{{ {single_cluster_label} }}))
+        """
+        cpu_query = f"""
+            sum(max by (instance) (machine_cpu_cores{{ {single_cluster_label} }}))
+        """
+        kube_system_requests_mem = f"""
+            sum(max(kube_pod_container_resource_requests{{ namespace='kube-system', resource='memory' {cluster_label} }})  by (job, pod, container) )
+        """
+        kube_system_requests_cpu = f"""
+            sum(max(kube_pod_container_resource_requests{{ namespace='kube-system', resource='cpu' {cluster_label} }})  by (job, pod, container) )
+        """
+        try:
+            cluster_memory_result = await self.query_and_validate(memory_query)
+            cluster_cpu_result = await self.query_and_validate(cpu_query)
+            kube_system_mem_result = await self.query_and_validate(kube_system_requests_mem)
+            kube_system_cpu_result = await self.query_and_validate(kube_system_requests_cpu)
+            return {
+                "cluster_memory": float(cluster_memory_result),
+                "cluster_cpu": float(cluster_cpu_result),
+                "kube_system_mem_req": float(kube_system_mem_result),
+                "kube_system_cpu_req": float(kube_system_cpu_result)
+            }
+
+        except Exception as e:
+            logger.error(f"Exception occurred while getting cluster summary: {e}")
+            return {}
+
+    async def load_pods(self, object: K8sObjectData, period: timedelta) -> list[PodData]:
         """
         List pods related to the object and add them to the object's pods list.
         Args:
             object (K8sObjectData): The Kubernetes object.
-            period (datetime.timedelta): The time period for which to gather data.
+            period (timedelta): The time period for which to gather data.
         """
 
         logger.debug(f"Adding historic pods for {object}")
 
-        days_literal = min(int(period.total_seconds()) // 60 // 24, 32)
+        days_literal = min(int(period.total_seconds()) // 3600 // 24, 32)
         period_literal = f"{days_literal}d"
-        pod_owners: list[str]
+        pod_owners: Iterable[str]
         pod_owner_kind: str
         cluster_label = self.get_prometheus_cluster_label()
         if object.kind in ["Deployment", "Rollout"]:
             replicasets = await self.query(
                 f"""
-                kube_replicaset_owner{{
-                    owner_name="{object.name}",
-                    owner_kind="{object.kind}",
-                    namespace="{object.namespace}"
-                    {cluster_label}
-                }}[{period_literal}]
+                    kube_replicaset_owner{{
+                        owner_name="{object.name}",
+                        owner_kind="{object.kind}",
+                        namespace="{object.namespace}"
+                        {cluster_label}
+                    }}[{period_literal}]
                 """
             )
-            pod_owners = [replicaset["metric"]["replicaset"] for replicaset in replicasets]
+            pod_owners = {replicaset["metric"]["replicaset"] for replicaset in replicasets}
             pod_owner_kind = "ReplicaSet"
 
             del replicasets
+
+        elif object.kind == "DeploymentConfig":
+            replication_controllers = await self.query(
+                f"""
+                    kube_replicationcontroller_owner{{
+                        owner_name="{object.name}",
+                        owner_kind="{object.kind}",
+                        namespace="{object.namespace}"
+                        {cluster_label}
+                    }}[{period_literal}]
+                """
+            )
+            pod_owners = {
+                repl_controller["metric"]["replicationcontroller"] for repl_controller in replication_controllers
+            }
+            pod_owner_kind = "ReplicationController"
+
+            del replication_controllers
+
+        elif object.kind == "CronJob":
+            jobs = await self.query(
+                f"""
+                    kube_job_owner{{
+                        owner_name="{object.name}",
+                        owner_kind="{object.kind}",
+                        namespace="{object.namespace}"
+                        {cluster_label}
+                    }}[{period_literal}]
+                """
+            )
+            pod_owners = {job["metric"]["job_name"] for job in jobs}
+            pod_owner_kind = "Job"
+
+            del jobs
         else:
             pod_owners = [object.name]
             pod_owner_kind = object.kind
 
-        owners_regex = "|".join(pod_owners)
-        related_pods_result = await self.query(
-            f"""
-                last_over_time(
-                    kube_pod_owner{{
-                        owner_name=~"{owners_regex}",
-                        owner_kind="{pod_owner_kind}",
-                        namespace="{object.namespace}"
-                        {cluster_label}
-                    }}[{period_literal}]
-                )
-            """
-        )
-
+        related_pods_result = []
+        batch_size = int(os.environ.get("KRR_OWNER_BATCH_SIZE", 100))
+        for owner_group in batched(pod_owners, batch_size):
+            owners_regex = "|".join(owner_group)
+            related_pods_result_item = await self.query(
+                f"""
+                    last_over_time(
+                        kube_pod_owner{{
+                            owner_name=~"{owners_regex}",
+                            owner_kind="{pod_owner_kind}",
+                            namespace="{object.namespace}"
+                            {cluster_label}
+                        }}[{period_literal}]
+                    )
+                """
+            )
+            related_pods_result.extend(related_pods_result_item)
         if related_pods_result == []:
             return []
 

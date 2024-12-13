@@ -132,6 +132,8 @@ dmypy.json
 
 .DS_Store
 robusta_lib
+.idea
+.vscode
 
 *.private-key.pem
 k8s_repo/
