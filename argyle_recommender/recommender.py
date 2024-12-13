@@ -82,7 +82,8 @@ def _format(value):
         return resource_units.format(value)
 
 
-def get_krr_json(label, namespace="*", prometheus=None, context=None, app_name=None) -> Result:
+def get_krr_json(label, namespace="*", prometheus=None, context=None, app_name=None,
+                 settings: dict = dict()) -> Result:
     log.debug("loading recomendations for %s in ns %s", label, namespace)
     if label == "no-selector":
         selector = []
@@ -105,6 +106,15 @@ def get_krr_json(label, namespace="*", prometheus=None, context=None, app_name=N
     command.extend(namespace_flag)
     command.extend(prometheus_flag)
     command.extend(context_flag)
+    cpu_min = settings.get("cpu_min", 10)
+    mem_min = settings.get("mem_min", 100)
+    command.extend(["--cpu-min", str(cpu_min), "--mem-min", str(mem_min)])
+    cpu_bump_percentage = settings.get("cpu_bump_percentage", 20)
+    command.extend(["--cpu-bump-percentage", str(cpu_bump_percentage)])
+    secondary_cpu_percentile = settings.get("secondary_cpu_percentile", 50)
+    command.extend(["--secondary-cpu-percentile", str(secondary_cpu_percentile)])
+    memory_buffer_percentage = settings.get("memory_buffer_percentage", 120)
+    command.extend(["--memory-buffer-percentage", str(memory_buffer_percentage)])
     log.info("%s: %s", app_name, ' '.join(command))
     krr = subprocess.run(command, capture_output=True, encoding="utf8", check=True).stdout
     results = None
@@ -141,13 +151,15 @@ def get_krr_json(label, namespace="*", prometheus=None, context=None, app_name=N
     return results
 
 
-def find_recommendations(build_yaml_path, namespace_flag, prometheus, context=None):
+def find_recommendations(build_yaml_path, namespace_flag, prometheus, context=None,
+                         settings: dict = dict()) -> Optional[Result]:
     scans = []
     results = None
     if build_yaml_path == "no-selector":
         namespace = namespace_flag
         return get_krr_json("no-selector", namespace=namespace,
-                            prometheus=prometheus, context=context)
+                            prometheus=prometheus, context=context,
+                            settings=settings)
 
     with open(build_yaml_path, "r", encoding="utf-8") as build_file:
         yaml = YAML()
@@ -183,7 +195,7 @@ def find_recommendations(build_yaml_path, namespace_flag, prometheus, context=No
                 namespace = namespace_flag
             results = get_krr_json(
                 f"{label_name}={label}", namespace, prometheus,
-                app_name=app_name, context=context)
+                app_name=app_name, context=context, settings=settings)
             if len(results.scans) == 0:
                 docs.pop(0)
                 continue
@@ -490,13 +502,15 @@ def handle_kustomizations(resources_path: str):
 def process_app(path: Union[str, pathlib.Path], namespace,
                 create_pr_flag: Union[bool, None] = False,
                 prometheus=None, __key=None, context=None,
-                clean_resources_flag: bool = False):
+                clean_resources_flag: bool = False,
+                settings: dict = dict()):
     if create_pr_flag is None:
         create_pr_flag = False
 
     repo = pull_repo(__key)
     os.chdir(repo.working_dir)
-    results = find_recommendations(path, namespace, prometheus, context=context)
+    results = find_recommendations(path, namespace, prometheus, context=context,
+                                   settings=settings)
     if results is None:
         return None
     if clean_resources_flag:
@@ -665,7 +679,13 @@ def main(path: Annotated[str, typer.Argument],
          incluster: Annotated[Optional[bool], typer.Option("--incluster")] = False,
          clean_resources_flag: Annotated[bool, typer.Option("--clean-resources")] = False,
          debug: Annotated[bool, typer.Option("--debug")] = False,
+         cpu_min: Annotated[int, typer.Option("--cpu-min")] = 10,
+         mem_min: Annotated[int, typer.Option("--mem-min")] = 100,
+         cpu_bump_percentage: Annotated[float, typer.Option("--cpu-bump-percentage")] = 20,
+         secondary_cpu_percentile: Annotated[float, typer.Option("--secondary-cpu-percentile")] = 50,
+         memory_buffer_percentage: Annotated[float, typer.Option("--memory-buffer-percentage")] = 120,
          ):
+
 
     key_file = os.environ.get("PRIVATE_KEY_FILE")
     if key_file:
@@ -681,6 +701,14 @@ def main(path: Annotated[str, typer.Argument],
             " path or PRIVATE_KEY with the key contents.")
     repo = pull_repo(__key)
     os.chdir(repo.working_dir)
+
+    settings = dict(
+        cpu_bump_percentage=cpu_bump_percentage,
+        memory_buffer_percentage=memory_buffer_percentage,
+        secondary_cpu_percentile=secondary_cpu_percentile,
+        cpu_min=cpu_min,
+        mem_min=mem_min,
+    )
     if path in ["prod", "all"] or path.startswith(".build"):
         if path.startswith(".build"):
             build_yamls(path)
@@ -691,12 +719,13 @@ def main(path: Annotated[str, typer.Argument],
                 context = app_yaml.name.replace(".yaml", "").split("-")[-1]
             try:
                 process_app(app_yaml, namespace, create_pr, prometheus, __key, context=context,
-                            clean_resources_flag=clean_resources_flag)
+                            clean_resources_flag=clean_resources_flag, settings=settings
+                            )
             except Exception:
                 log.exception("error in processing app %s", app_yaml, stack_info=True)
     else:
         process_app(path, namespace, create_pr, prometheus, __key, context=context,
-                    clean_resources_flag=clean_resources_flag)
+                    clean_resources_flag=clean_resources_flag, settings=settings)
 
 
 if __name__ == "__main__":

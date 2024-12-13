@@ -57,6 +57,7 @@ def SecondaryPercentileCPULoader(percentile: float) -> type[PrometheusMetric]:
     return SecondaryPercentileCPULoader
 
 
+#TODO move to MaxOOMKilledMemoryLoader
 class OOMKilledLoader(PrometheusMetric):
     """
     A metric loader for loading OOMKilled metrics.
@@ -81,7 +82,7 @@ class OOMKilledLoader(PrometheusMetric):
 # Providing description to the settings will make it available in the CLI help
 class ArgyleStrategySettings(SimpleStrategySettings):
     memory_buffer_percentage: float = pd.Field(
-        50, gt=0, description="The percentage of added buffer to the peak memory usage for memory limit recommendation."
+        120, gt=0, description="The percentage of added buffer to the peak memory usage for memory limit recommendation."
     )
 
     def calculate_memory_usage(self, data: PodsTimeData) -> float:
@@ -89,10 +90,14 @@ class ArgyleStrategySettings(SimpleStrategySettings):
         if len(data_) == 0:
             return float("NaN")
 
-        return np.max(data_)
+        return float(np.max(data_))
 
     secondary_cpu_percentile: float = pd.Field(
         50, gt=0, description="The percentile to use for the secondary CPU usage metric."
+    )
+
+    cpu_bump_percentage: float = pd.Field(
+        20, gt=0, description="The percentage of added buffer to the CPU request."
     )
 
 
@@ -112,7 +117,7 @@ class ArgyleStrategy(BaseStrategy[ArgyleStrategySettings]):
             History: {self.settings.history_duration} hours
             Step: {self.settings.timeframe_duration} minutes
 
-            All parameters can be customized. For example: `krr simple --cpu_percentile=90 --memory_buffer_percentage=15 --history_duration=24 --timeframe_duration=0.5`
+            All parameters can be customized. For example: `krr argyle --cpu_percentile=90 --memory_buffer_percentage=15 --history_duration=24 --timeframe_duration=0.5`
             """)
     @staticmethod
     def info_from_list(info_list: list[str]):
@@ -172,7 +177,7 @@ class ArgyleStrategy(BaseStrategy[ArgyleStrategySettings]):
         # if object_data.labels:
         #     print(object_data.labels)
 
-        cpu_usage = self.settings.calculate_cpu_proposal(filtered_data)
+        cpu_usage = self.settings.calculate_cpu_proposal(filtered_data) * (1 + self.settings.cpu_bump_percentage / 100)
         cpu_limit = (self._calculate_cpu_limit(cpu_usage))
         return ResourceRecommendation(request=cpu_usage, limit=cpu_limit, info=info)
 
@@ -184,7 +189,7 @@ class ArgyleStrategy(BaseStrategy[ArgyleStrategySettings]):
         if len(data) == 0:
             return ResourceRecommendation.undefined(info="No data")
 
-        data_count = {pod: values[0, 1] for pod, values in history_data["MemoryAmountLoader"].items()}
+        data_count = {pod: values[0, 1] for pod, values in data.items()}
         # Here we filter out pods from calculation that have less than `points_required` data points
         filtered_data = {
             pod: value for pod, value in data.items() if data_count.get(pod, 0) >= self.settings.points_required
@@ -197,7 +202,7 @@ class ArgyleStrategy(BaseStrategy[ArgyleStrategySettings]):
         if object_data.hpa is not None and object_data.hpa.target_memory_utilization_percentage is not None:
             info.append("Memory utilization HPA detected, be wary of ever increasing recommendations")
 
-
+        #TODO move to MaxOOMKilledMemoryLoader
         if history_data.get("OOMKilledLoader", None):
             info.append("Container has been OOMKilled in the period")
             # if OOMKilled consider usage = limit
