@@ -4,6 +4,7 @@ from typing import Literal, Optional, Union
 
 import pydantic as pd
 
+from robusta_krr.utils.object_like_dict import ObjectLikeDict
 from robusta_krr.core.models.allocations import ResourceAllocations
 from robusta_krr.utils.batched import batched
 from kubernetes.client.models import V1LabelSelector
@@ -80,7 +81,11 @@ class K8sObjectData(pd.BaseModel):
         if self.kind == 'CronJob':
             return self._api_resource.spec.job_template.spec.selector
         else:
-            return self._api_resource.spec.selector
+            selector = self._api_resource.spec.selector
+            if isinstance(selector, ObjectLikeDict) or isinstance(selector, dict):
+                selector = V1LabelSelector(match_labels=selector.get("matchLabels", {}),
+                                           match_expressions=None)
+            return selector
 
     def split_into_batches(self, n: int) -> list[K8sObjectData]:
         """

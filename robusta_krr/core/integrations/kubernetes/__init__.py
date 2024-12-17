@@ -153,10 +153,6 @@ class ClusterLoader:
             if selector is None:
                 return []
 
-        print(selector)
-        print(type(selector))
-        print(object.selector)
-        print(type(object.selector))
         ret: V1PodList = await loop.run_in_executor(
             self.executor,
             lambda: self.core.list_namespaced_pod(
@@ -179,7 +175,6 @@ class ClusterLoader:
     @staticmethod
     def _build_selector_query(selector: Any) -> Union[str, None]:
         label_filters = []
-
         if selector.match_labels is not None:
             label_filters += [f"{label[0]}={label[1]}" for label in selector.match_labels.items()]
 
@@ -218,8 +213,6 @@ class ClusterLoader:
             if not isinstance(annotations, dict): 
                 annotations = {k: v for k, v in annotations.items()}
 
-        print (f"Labels: {labels}")
-        print(type(labels))
         obj = K8sObjectData(
             cluster=self.cluster,
             namespace=namespace,

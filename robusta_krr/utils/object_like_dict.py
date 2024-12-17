@@ -27,3 +27,6 @@ class ObjectLikeDict:
 
     def items(self):
         return self.__dict__.items()
+
+    def to_dict(self):
+        return {key: value.to_dict() if isinstance(value, ObjectLikeDict) else value for key, value in self.items()}
