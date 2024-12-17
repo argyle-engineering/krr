@@ -27,8 +27,9 @@ from rich.console import Console
 import git
 
 
+from robusta_krr.core.models.allocations import ResourceType
 from robusta_krr.formatters.table import table, NAN_LITERAL
-from robusta_krr.core.models.result import Result
+from robusta_krr.core.models.result import Result, Recommendation
 from robusta_krr.core.models.config import Config
 from robusta_krr.utils import resource_units
 
@@ -116,7 +117,13 @@ def get_krr_json(label, namespace="*", prometheus=None, context=None, app_name=N
     memory_buffer_percentage = settings.get("memory_buffer_percentage", 120)
     command.extend(["--memory-buffer-percentage", str(memory_buffer_percentage)])
     log.info("%s: %s", app_name, ' '.join(command))
-    krr = subprocess.run(command, capture_output=True, encoding="utf8", check=True).stdout
+    try:
+        krr = subprocess.run(command, capture_output=True, encoding="utf8", check=True).stdout
+    except subprocess.CalledProcessError as e:
+        # A job may not have run in the history period, leading to no objects to scan
+        if 'CRITICAL No objects available to scan' in e.stdout:
+            return Result(scans=[], strategy={"name": "dummy_strategy", "settings": {}})
+        raise e
     results = None
     try:
         results = json.loads(krr)
@@ -352,6 +359,10 @@ def total_estimate_in_table(table, results):
     table.add_column("RAM cost")
 
     for scan in results.scans:
+        if scan.object.warnings is not None:
+            if ("NoPrometheusCPUMetrics" in scan.object.warnings or
+                "NoPrometheusMemoryMetrics" in scan.object.warnings):
+                continue
         n_pods = scan.object.current_pods_count
         cpu = scan.recommended.requests["cpu"].value * n_pods or 0
         ram = scan.recommended.requests["memory"].value * n_pods or 0
@@ -499,6 +510,40 @@ def handle_kustomizations(resources_path: str):
         parent_kustomization_file.seek(0)
 
 
+def should_create_pr(results, merge_pr_flag):
+    if merge_pr_flag:
+        return True
+    if results.score < 80:
+        return True
+    return False
+
+
+def results_only_increase(results: Result) -> bool:
+    for scan in results.scans:
+        cpu_rec = scan.recommended.requests[ResourceType.CPU]
+        mem_rec = scan.recommended.requests[ResourceType.Memory]
+        cpu_alloc_req = scan.object.allocations.requests[ResourceType.CPU]
+        mem_alloc_req = scan.object.allocations.requests[ResourceType.Memory]
+        if cpu_alloc_req is None or mem_alloc_req is None:
+            return False
+        assert isinstance(cpu_rec, Recommendation)
+        assert isinstance(mem_rec, Recommendation)
+        assert isinstance(cpu_alloc_req, float)
+        assert isinstance(mem_alloc_req, float)
+        if isinstance(cpu_rec.value, float) and isinstance(mem_rec.value, float):
+            if cpu_rec.value < cpu_alloc_req or mem_rec.value < mem_alloc_req:
+                return False
+    return True
+
+
+def should_merge_pr(results):
+    if results.score > 50 and results_only_increase(results):
+        log.info("Score %s is above 50 and only increases, auto_merging PR", results.score)
+        return True
+    else:
+        return False
+
+
 def process_app(path: Union[str, pathlib.Path], namespace,
                 create_pr_flag: Union[bool, None] = False,
                 prometheus=None, __key=None, context=None,
@@ -518,10 +563,13 @@ def process_app(path: Union[str, pathlib.Path], namespace,
     create_resource_transformers(results, path)
     tbl = table(results)
     total_estimate_in_table(tbl, results)
-    if create_pr_flag and results.score > 70:
-        log.info("Score %s is above 70, not creating PR", results.score)
+    merge_pr_flag = should_merge_pr(results)
+
+    # checking for create_pr_flag here to short-circuit the should check
+    if create_pr_flag and not should_create_pr(results, merge_pr_flag):
         create_pr_flag = False
-    pr = create_pr_func(create_pr_flag, path=path, namespace=namespace, table=tbl, __key=__key)
+    pr = create_pr_func(create_pr_flag, path=path, namespace=namespace, table=tbl, __key=__key,
+                        merge_pr_flag=merge_pr_flag)
     if create_pr_flag and not isinstance(pr, tuple):
         log.info("PR %s created. https://github.com/argyle-systems/argyle-k8s/pull/%s ",
                  pr.number, pr.number)
@@ -571,7 +619,8 @@ def build_yamls(path=None):
     subprocess.run([make, target], check=True)
 
 
-def create_pr_func(create=False, path=None, namespace=None, table=None, __key=None):
+def create_pr_func(create=False, path=None, namespace=None, table=None, __key=None,
+                   merge_pr_flag=False):
     if table is None:
         raise ValueError("Need resource table to create the PR body")
     app = ""
@@ -641,6 +690,10 @@ Monthly cost estimates are based on the same strategy used to adjust resources.
             return (pr_title, body, branch_name)
         try:
             pr = ghrepo.create_pull(title=pr_title, body=body, head=branch_name, base="master")
+            labels = ["krr"]
+            if merge_pr_flag:
+                labels.append("krr-automerge")
+            pr.add_to_labels(*labels)
             return pr
         except github.GithubException as e:
             messages = [er.get("message") for er in e.data.get("errors", dict())]

@@ -153,6 +153,10 @@ class ClusterLoader:
             if selector is None:
                 return []
 
+        print(selector)
+        print(type(selector))
+        print(object.selector)
+        print(type(object.selector))
         ret: V1PodList = await loop.run_in_executor(
             self.executor,
             lambda: self.core.list_namespaced_pod(
@@ -197,26 +201,25 @@ class ClusterLoader:
     def __build_scannable_object(
         self, item: AnyKubernetesAPIObject, container: V1Container, kind: Optional[str] = None
     ) -> K8sObjectData:
+        assert item.metadata
         name = item.metadata.name
         namespace = item.metadata.namespace
         kind = kind or item.__class__.__name__[2:]
-        
-        labels = []
-        if item.metadata.labels:
-            labels = item.metadata.labels
-        
-        annotations = []
-        if item.metadata.annotations:
-            annotations = item.metadata.annotations
 
         labels = {}
         annotations = {}
         if item.metadata.labels:
             labels = item.metadata.labels
+            if not isinstance(labels, dict):
+                labels = {k: v for k, v in labels.items()}
 
         if item.metadata.annotations:
             annotations = item.metadata.annotations
+            if not isinstance(annotations, dict): 
+                annotations = {k: v for k, v in annotations.items()}
 
+        print (f"Labels: {labels}")
+        print(type(labels))
         obj = K8sObjectData(
             cluster=self.cluster,
             namespace=namespace,
