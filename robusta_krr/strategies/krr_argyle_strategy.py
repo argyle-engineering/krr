@@ -24,6 +24,7 @@ from robusta_krr.core.integrations.prometheus.metrics import (
 from robusta_krr.strategies.simple import SimpleStrategySettings
 
 from robusta_krr.core.integrations.prometheus.metrics.base import QueryType
+from robusta_krr.utils import resource_units
 from robusta_krr.utils.resource_units import parse
 
 
@@ -104,14 +105,14 @@ class ArgyleStrategySettings(SimpleStrategySettings):
     memory_stategy: str = pd.Field(
         "default", description="The memory strategy to use for the recommendation."
     )
-    cpu_request_min: int = pd.Field(
-        20, gt=0, description="The minimum CPU request value in milicores."
+    cpu_request_min: float = pd.Field(
+        0.2, gt=0, description="The minimum CPU request value in cores."
     )
     mem_request_min: int = pd.Field(
-        100, gt=0, description="The minimum memory request value in megabytes."
+        100 *1024**2, gt=0, description="The minimum memory request value in bytes."
     )
     mem_limit_min: int = pd.Field(
-        100, gt=0, description="The minimum memory limit value in megabytes."
+        100 *1024**2, gt=0, description="The minimum memory limit value in bytes."
     )
 
 
@@ -162,6 +163,8 @@ class ArgyleStrategy(BaseStrategy[ArgyleStrategySettings]):
                 annotation = object_data.annotations.get(
                     annotation_prefix + normalized_setting, None)
                 if annotation:
+                    if prop[-4:] == "_min":
+                        annotation = resource_units.parse(annotation)
                     setattr(self.settings, prop, annotation)
 
     def _calculate_cpu_limit(self, cpu_recommended: float):
@@ -208,8 +211,9 @@ class ArgyleStrategy(BaseStrategy[ArgyleStrategySettings]):
         #     print(object_data.labels)
 
         cpu_usage = self.settings.calculate_cpu_proposal(filtered_data) * (1 + self.settings.cpu_bump_percentage / 100)
-        if cpu_usage < self.settings.cpu_request_min / 1000:
-            cpu_usage = self.settings.cpu_request_min / 1000
+        cpu_request_min = self.settings.cpu_request_min
+        if cpu_usage < cpu_request_min:
+            cpu_usage = cpu_request_min
         cpu_limit = (self._calculate_cpu_limit(cpu_usage))
         return ResourceRecommendation(request=cpu_usage, limit=cpu_limit, info=info)
 
