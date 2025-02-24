@@ -101,6 +101,7 @@ class ClusterLoader:
         workload_object_lists = await asyncio.gather(
             self._list_deployments(),
             self._list_rollouts(),
+            self._list_strimzipodsets(),
             self._list_deploymentconfig(),
             self._list_all_statefulsets(),
             self._list_all_daemon_set(),
@@ -182,6 +183,15 @@ class ClusterLoader:
             label_filters += [
                 ClusterLoader._get_match_expression_filter(expression) for expression in selector.match_expressions
             ]
+        
+        # normally the kubernetes API client renames matchLabels to match_labels in python
+        # but for CRDs like ArgoRollouts that renaming doesn't happen and we have selector={'matchLabels': {'app': 'test-app'}}
+        if getattr(selector, "matchLabels", None):
+            label_filters += [f"{label[0]}={label[1]}" for label in getattr(selector, "matchLabels").items()]
+        if getattr(selector, "matchExpressions", None):
+            label_filters += [
+                ClusterLoader._get_match_expression_filter(expression) for expression in getattr(selector, "matchExpressions").items()
+            ]
 
         if label_filters == []:
             # NOTE: This might mean that we have DeploymentConfig,
@@ -204,14 +214,16 @@ class ClusterLoader:
         labels = {}
         annotations = {}
         if item.metadata.labels:
-            labels = item.metadata.labels
-            if not isinstance(labels, dict):
-                labels = {k: v for k, v in labels.items()}
+            if type(item.metadata.labels) is ObjectLikeDict:
+                labels = item.metadata.labels.__dict__
+            else:  
+                labels = item.metadata.labels
 
         if item.metadata.annotations:
-            annotations = item.metadata.annotations
-            if not isinstance(annotations, dict): 
-                annotations = {k: v for k, v in annotations.items()}
+            if type(item.metadata.annotations) is ObjectLikeDict:
+                annotations = item.metadata.annotations.__dict__
+            else:
+                annotations = item.metadata.annotations
 
         obj = K8sObjectData(
             cluster=self.cluster,
@@ -300,7 +312,7 @@ class ClusterLoader:
 
                 result.extend(self.__build_scannable_object(item, container, kind) for container in containers)
         except ApiException as e:
-            if kind in ("Rollout", "DeploymentConfig") and e.status in [400, 401, 403, 404]:
+            if kind in ("Rollout", "DeploymentConfig", "StrimziPodSet") and e.status in [400, 401, 403, 404]:
                 if self.__kind_available[kind]:
                     logger.debug(f"{kind} API not available in {self.cluster}")
                 self.__kind_available[kind] = False
@@ -363,6 +375,30 @@ class ClusterLoader:
                 )
             ),
             extract_containers=_extract_containers,
+        )
+
+    def _list_strimzipodsets(self) -> list[K8sObjectData]:
+        # NOTE: Using custom objects API returns dicts, but all other APIs return objects
+        # We need to handle this difference using a small wrapper
+        return self._list_scannable_objects(
+            kind="StrimziPodSet",
+            all_namespaces_request=lambda **kwargs: ObjectLikeDict(
+                self.custom_objects.list_cluster_custom_object(
+                    group="core.strimzi.io",
+                    version="v1beta2",
+                    plural="strimzipodsets",
+                    **kwargs,
+                )
+            ),
+            namespaced_request=lambda **kwargs: ObjectLikeDict(
+                self.custom_objects.list_namespaced_custom_object(
+                    group="core.strimzi.io",
+                    version="v1beta2",
+                    plural="strimzipodsets",
+                    **kwargs,
+                )
+            ),
+            extract_containers=lambda item: item.spec.pods[0].spec.containers,
         )
 
     def _list_deploymentconfig(self) -> list[K8sObjectData]:
