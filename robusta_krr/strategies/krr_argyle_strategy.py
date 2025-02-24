@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 import textwrap
+from typing import Literal
 
+from pkg_resources import normalize_path
 import pydantic as pd
 import numpy as np
 
@@ -99,6 +101,18 @@ class ArgyleStrategySettings(SimpleStrategySettings):
     cpu_bump_percentage: float = pd.Field(
         20, gt=0, description="The percentage of added buffer to the CPU request."
     )
+    memory_stategy: str = pd.Field(
+        "default", description="The memory strategy to use for the recommendation."
+    )
+    cpu_request_min: int = pd.Field(
+        20, gt=0, description="The minimum CPU request value in milicores."
+    )
+    mem_request_min: int = pd.Field(
+        100, gt=0, description="The minimum memory request value in megabytes."
+    )
+    mem_limit_min: int = pd.Field(
+        100, gt=0, description="The minimum memory limit value in megabytes."
+    )
 
 
 class ArgyleStrategy(BaseStrategy[ArgyleStrategySettings]):
@@ -133,6 +147,22 @@ class ArgyleStrategy(BaseStrategy[ArgyleStrategySettings]):
                 CPUAmountLoader, MemoryAmountLoader, OOMKilledLoader,
                 SecondaryPercentileCPULoader(self.settings.secondary_cpu_percentile),
         ]
+
+    def handle_annotations(self, object_data: K8sObjectData):
+        '''Helper function to handle annotations
+
+        For each property in ArgyleStrategySettings check if there is a corresponding annotation
+        in the object_data. If there is, set the property to the value of the annotation.
+        '''
+        annotation_prefix = "krr.infra.argyle.com/"
+
+        if object_data.annotations:
+            for prop in ArgyleStrategySettings.__fields__.keys():
+                normalized_setting = prop.replace("_", "-")
+                annotation = object_data.annotations.get(
+                    annotation_prefix + normalized_setting, None)
+                if annotation:
+                    setattr(self.settings, prop, annotation)
 
     def _calculate_cpu_limit(self, cpu_recommended: float):
         if cpu_recommended < 0.3:
@@ -178,6 +208,8 @@ class ArgyleStrategy(BaseStrategy[ArgyleStrategySettings]):
         #     print(object_data.labels)
 
         cpu_usage = self.settings.calculate_cpu_proposal(filtered_data) * (1 + self.settings.cpu_bump_percentage / 100)
+        if cpu_usage < self.settings.cpu_request_min / 1000:
+            cpu_usage = self.settings.cpu_request_min / 1000
         cpu_limit = (self._calculate_cpu_limit(cpu_usage))
         return ResourceRecommendation(request=cpu_usage, limit=cpu_limit, info=info)
 
@@ -209,15 +241,9 @@ class ArgyleStrategy(BaseStrategy[ArgyleStrategySettings]):
             memory_usage = object_data.allocations.limits.get(ResourceType.Memory)
         else:
             memory_usage = self.settings.calculate_memory_usage(filtered_data)
-
-        strategy =  (
-            object_data.annotations.get("argyle-krr-memory-strategy", "default") if
-            object_data.annotations else "default"
-        )
-        min_memory_limit = (
-            object_data.annotations.get("argyle-krr-memory-limit-min", None) if
-            object_data.annotations else None
-        )
+        
+        min_memory_limit = self.settings.mem_limit_min
+        strategy = self.settings.memory_stategy
         memory_limit = None
 
         if min_memory_limit and isinstance(min_memory_limit, str):
@@ -225,11 +251,18 @@ class ArgyleStrategy(BaseStrategy[ArgyleStrategySettings]):
 
         if strategy == "default" and isinstance(memory_usage, float):
             memory_request = memory_usage
+            if memory_usage < self.settings.mem_request_min:
+                memory_usage = self.settings.mem_request_min
             memory_limit = memory_usage * (1 + self.settings.memory_buffer_percentage / 100 )
         elif strategy == "guaranteed" and isinstance(memory_usage, float):
+            if memory_usage < self.settings.mem_request_min:
+                memory_usage = self.settings.mem_request_min
             memory_request = memory_usage * (1 + self.settings.memory_buffer_percentage / 100 )
             memory_limit = memory_usage * (1 + self.settings.memory_buffer_percentage / 100 )
         else:
+            if memory_usage == Literal['?'] or memory_usage is None:
+                memory_usage = self.settings.mem_request_min
+            assert isinstance(memory_usage, float)
             memory_request = memory_usage
             memory_limit = memory_usage * (1 + self.settings.memory_buffer_percentage / 100 )
 
@@ -242,6 +275,7 @@ class ArgyleStrategy(BaseStrategy[ArgyleStrategySettings]):
         return ResourceRecommendation(request=memory_request, limit=memory_limit, info=info)
 
     def run(self, history_data: MetricsPodData, object_data: K8sObjectData) -> RunResult:
+        self.handle_annotations(object_data)
         return {
             ResourceType.CPU: self.__calculate_cpu_proposal(history_data, object_data),
             ResourceType.Memory: self.__calculate_memory_proposal(history_data, object_data),
