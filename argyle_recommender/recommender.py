@@ -9,6 +9,8 @@ import json
 import datetime
 import logging
 import sys
+import tempfile
+import shutil
 
 import structlog
 
@@ -83,7 +85,7 @@ def _format(value):
         return resource_units.format(value)
 
 
-def get_krr_json(label, namespace="*", prometheus=None, context=None, app_name=None,
+def get_krr_json(label, namespace: Optional[str] ="*", prometheus=None, context=None, app_name=None,
                  settings: dict = dict()) -> Result:
     log.debug("loading recomendations for %s in ns %s", label, namespace)
     if label == "no-selector":
@@ -116,6 +118,8 @@ def get_krr_json(label, namespace="*", prometheus=None, context=None, app_name=N
     command.extend(["--secondary-cpu-percentile", str(secondary_cpu_percentile)])
     memory_buffer_percentage = settings.get("memory_buffer_percentage", 120)
     command.extend(["--memory-buffer-percentage", str(memory_buffer_percentage)])
+    if app_name is None:
+        app_name = "krr"
     log.info("%s: %s", app_name, ' '.join(command))
     try:
         krr = subprocess.run(command, capture_output=True, encoding="utf8", check=True).stdout
@@ -147,6 +151,8 @@ def get_krr_json(label, namespace="*", prometheus=None, context=None, app_name=N
     try:
         results["config"]["resources"] = []
         results["config"]["show_cluster_name"] = True
+        if results["config"].get("namespaces") == ["*"]:
+            del results["config"]["namespaces"]
         config = Config(**results["config"])
         Config.set_config(config)
 
@@ -219,6 +225,8 @@ def find_recommendations(build_yaml_path, namespace_flag, prometheus, context=No
             scans.extend(results.scans)
     assert isinstance(results, Result)
     results.scans = scans
+    if results.config and results.config.namespaces == ["*"]:
+        results.config.namespaces = []
     results = Result(**results.dict())  # reinit to calculate score
     return results
 
@@ -270,14 +278,15 @@ def create_resource_transformers(results: Result, path: Union[str, pathlib.Path]
     path = pathlib.Path(path)
     app_path = ""
     app_path = path.name.replace("-prod.yaml", "").replace("-dev.yaml", "")
+    log.info("Creating resource transformers for %s", app_path)
+    if app_path.startswith("scanners-application-"):
+        app_path = "scanners"
     for scan in results.scans:
         kind = scan.object.kind.lower()
         name = scan.object.name
         namespace = scan.object.namespace
         container = scan.object.container
 
-        if app_path.startswith("scanners-application-"):
-            app_path = "scanners"
 
         transformer_path = pathlib.Path(
             f"namespaces/{app_path}/resources/{app_path}-resourcetransformer.yaml"
@@ -327,6 +336,9 @@ def create_resource_transformers(results: Result, path: Union[str, pathlib.Path]
                     r for r in transformer["resourceQuotas"] if not (
                         r["container"] == container and r["workload"] == name
                         and r["kind"] == WORKLOADS_MAP[kind])]
+                if "?" in [resource_quota.get("requests", {}).get("cpu"),
+                           resource_quota.get("requests", {}).get("memory")]:
+                    continue
                 transformer["resourceQuotas"].append(resource_quota)
             except TypeError as e:
                 log.error("%s/%s/%s/%s", kind, namespace, name, container)
@@ -335,6 +347,7 @@ def create_resource_transformers(results: Result, path: Union[str, pathlib.Path]
             yaml.dump(transformer, transformer_file)
             transformer_file.truncate()
             transformer_file.seek(0)
+    log.info("Handling kustomizations for %s", app_path)
     handle_kustomizations(f"namespaces/{app_path}/resources/")
     return None
 
@@ -552,29 +565,32 @@ def process_app(path: Union[str, pathlib.Path], namespace,
     if create_pr_flag is None:
         create_pr_flag = False
 
-    repo = pull_repo(__key)
-    os.chdir(repo.working_dir)
-    results = find_recommendations(path, namespace, prometheus, context=context,
-                                   settings=settings)
-    if results is None:
-        return None
-    if clean_resources_flag:
-        clean_resources(path)
-    create_resource_transformers(results, path)
-    tbl = table(results)
-    total_estimate_in_table(tbl, results)
-    merge_pr_flag = should_merge_pr(results)
+    try:
+        repo = pull_repo(__key, os.getcwd())
+        os.chdir(repo.working_dir)
+        results = find_recommendations(path, namespace, prometheus, context=context,
+                                    settings=settings)
+        if results is None:
+            return None
+        if clean_resources_flag:
+            clean_resources(path)
+        create_resource_transformers(results, path)
+        tbl = table(results)
+        total_estimate_in_table(tbl, results)
+        merge_pr_flag = should_merge_pr(results)
 
-    # checking for create_pr_flag here to short-circuit the should check
-    if create_pr_flag and not should_create_pr(results, merge_pr_flag):
-        create_pr_flag = False
-    pr = create_pr_func(create_pr_flag, path=path, namespace=namespace, table=tbl, __key=__key,
-                        merge_pr_flag=merge_pr_flag)
-    if create_pr_flag and not isinstance(pr, tuple):
-        log.info("PR %s created. https://github.com/argyle-systems/argyle-k8s/pull/%s ",
-                 pr.number, pr.number)
-    else:
-        log.info("PR's content would have been %s", str(pr))
+        # checking for create_pr_flag here to short-circuit the should check
+        if create_pr_flag and not should_create_pr(results, merge_pr_flag):
+            create_pr_flag = False
+        pr = create_pr_func(create_pr_flag, path=path, namespace=namespace, table=tbl, __key=__key,
+                            merge_pr_flag=merge_pr_flag)
+        if create_pr_flag and not isinstance(pr, tuple):
+            log.info("PR %s created. https://github.com/argyle-systems/argyle-k8s/pull/%s ",
+                    pr.number, pr.number)
+        else:
+            log.info("PR's content would have been %s", str(pr))
+    finally:
+        shutil.rmtree(repo.working_dir, ignore_errors=True)
 
 
 def get_github_token(__key):
@@ -588,28 +604,35 @@ def auth_github_app(__key):
     return github.Auth.AppAuth(717966, __key)
 
 
-def pull_repo(__key):
+def pull_repo(__key, repo_path=None):
     token = get_github_token(__key)
     app_dir = os.path.normpath(os.path.join(os.path.dirname(__file__), ".."))
     os.chdir(app_dir)
-    local_path = "k8s_repo"
+    if repo_path is None or repo_path.endswith("krr"):
+        repo_path = tempfile.mkdtemp(dir=app_dir)
     username = "krr-recommender"
     password = token.token
     remote = f"https://{username}:{password}@github.com/argyle-systems/argyle-k8s.git"
 
-    if os.path.isdir(local_path):
-        repo = git.Repo(local_path)
+    if os.path.isdir(os.path.join(repo_path, ".git")):
+        repo = git.Repo(repo_path)
+        origin = repo.remote("origin")
+        origin.set_url(remote)
+        origin.fetch()
+        origin.pull("master")
         repo.head.reset(working_tree=True)
-        repo.heads.master.checkout()
-
+        log.info("Updated repo at %s", repo_path)
     else:
-        repo = git.Repo.clone_from(remote, local_path)
+        repo = git.Repo.clone_from(remote, repo_path)
+        log.info("Cloned repo to %s", repo_path)
     return repo
 
 
 def build_yamls(path=None):
     if path is None:
         target = "build-prod"
+    elif path == "all":
+        target = "build"
     else:
         target = path
     make = "make"
@@ -619,13 +642,15 @@ def build_yamls(path=None):
     subprocess.run([make, target], check=True)
 
 
-def create_pr_func(create=False, path=None, namespace=None, table=None, __key=None,
-                   merge_pr_flag=False):
+def create_pr_func(create=False, path=None, namespace=None, table=None, merge_pr_flag=False,
+                   __key=None, selector=None):
     if table is None:
         raise ValueError("Need resource table to create the PR body")
     app = ""
     if str(path).startswith(".build"):
-        app = str(path).replace(".build/", "").replace("-prod.yaml", "")
+        app = str(path).replace(".build/", "").replace("-prod.yaml", "").replace("-dev.yaml", "")
+    if app.startswith("scanners-application-"):
+        app = "scanners"
     repo = git.Repo(".")
 
     branch_suffix = ""
@@ -635,15 +660,18 @@ def create_pr_func(create=False, path=None, namespace=None, table=None, __key=No
         branch_suffix = f"{datetime.datetime.now().timestamp():0.0f}"
 
     author = git.Actor("Argyle KRR recommender", "infrastructure+krrrecommender@argyle.com")
-    branch_name = f"krr-recommender-{branch_suffix}"
-    commit_msg = f"Adjusting resources according to usage{f' for app {app}' if app else f' for namespace {namespace}' if namespace else ''}."
+    timestamp = datetime.datetime.now().timestamp()
+    branch_name = f"krr-recommender-{branch_suffix}-{timestamp}"
+    commit_msg = (f"Adjusting resources according to usage{f' for app {app}' if app else f' for namespace {namespace}' if namespace else ''}."
+                   f"{f' With selector {selector}.' if selector else ''}")
     githubconsole.print(table)
 
     report = githubconsole.export_text()
-    g = github.Github(get_github_token(__key).token)
+    token = get_github_token(__key).token
+    g = github.Github(token)
     ghrepo = g.get_repo("argyle-systems/argyle-k8s")
     body = f'''This is an automated PR to adjust resources{f" for {app}" if app else ""}.
-{"This is created by looking at common selectors in workloads in the build output." if app else ""}
+{f"This is created by looking at Workloads with selector label {selector}." if selector else ""}
 {f"This is created by looking at all workloads in the namespace {namespace}." if namespace else ""}
 
 Resources recommendations are based on usage and paramaters that can be fine tuned.
@@ -683,6 +711,10 @@ Monthly cost estimates are based on the same strategy used to adjust resources.
         repo.index.commit(commit_msg, author=author, committer=author)
 
         try:
+            origin = repo.remote("origin")
+            username = "krr-recommender"
+            password = token
+            origin.set_url(f"https://{username}:{password}@github.com/argyle-systems/argyle-k8s.git")
             repo.remote("origin").push(branch_name).raise_if_error()
         except git.GitError as e:
             log.error("Error pushing to origin")
@@ -694,6 +726,8 @@ Monthly cost estimates are based on the same strategy used to adjust resources.
             if merge_pr_flag:
                 labels.append("krr-automerge")
             pr.add_to_labels(*labels)
+            repo.remote("origin").pull("master")
+            repo.heads["master"].checkout()
             return pr
         except github.GithubException as e:
             messages = [er.get("message") for er in e.data.get("errors", dict())]
@@ -711,6 +745,8 @@ Monthly cost estimates are based on the same strategy used to adjust resources.
 
 def clean_resources(app_path):
     """Function to delete all resources transformers before creating new ones"""
+    if isinstance(app_path, str):
+        app_path = pathlib.Path(app_path)
     app_path = app_path.name.replace("-prod.yaml", "").replace("-dev.yaml", "")
     if app_path.startswith("scanners-application-"):
         app_path = "scanners"
@@ -732,8 +768,8 @@ def main(path: Annotated[str, typer.Argument],
          incluster: Annotated[Optional[bool], typer.Option("--incluster")] = False,
          clean_resources_flag: Annotated[bool, typer.Option("--clean-resources")] = False,
          debug: Annotated[bool, typer.Option("--debug")] = False,
-         cpu_min: Annotated[int, typer.Option("--cpu-min")] = 10,
-         mem_min: Annotated[int, typer.Option("--mem-min")] = 100,
+         cpu_min: Annotated[int, typer.Option("--cpu-min")] = 200,
+         mem_min: Annotated[int, typer.Option("--mem-min")] = 200,
          cpu_bump_percentage: Annotated[float, typer.Option("--cpu-bump-percentage")] = 20,
          secondary_cpu_percentile: Annotated[float, typer.Option("--secondary-cpu-percentile")] = 50,
          memory_buffer_percentage: Annotated[float, typer.Option("--memory-buffer-percentage")] = 120,
@@ -767,15 +803,25 @@ def main(path: Annotated[str, typer.Argument],
             build_yamls(path)
         else:
             build_yamls()
-        for app_yaml in pathlib.Path(".build").glob("*.yaml"):
+        if path in ["prod", "all"]:
+            for app_yaml in pathlib.Path(".build").glob("*.yaml"):
+                if context is None and not incluster:
+                    context = app_yaml.name.replace(".yaml", "").split("-")[-1]
+                try:
+                    process_app(app_yaml, namespace, create_pr, prometheus, __key, context=context,
+                                clean_resources_flag=clean_resources_flag, settings=settings
+                                )
+                except Exception:
+                    log.exception("error in processing app %s", app_yaml, stack_info=True)
+        else:
+            app_yaml = pathlib.Path(path)
+            if not app_yaml.is_file():
+                raise ValueError(f"File {path} does not exist")
             if context is None and not incluster:
                 context = app_yaml.name.replace(".yaml", "").split("-")[-1]
-            try:
-                process_app(app_yaml, namespace, create_pr, prometheus, __key, context=context,
-                            clean_resources_flag=clean_resources_flag, settings=settings
-                            )
-            except Exception:
-                log.exception("error in processing app %s", app_yaml, stack_info=True)
+            process_app(app_yaml, namespace, create_pr, prometheus, __key, context=context,
+                        clean_resources_flag=clean_resources_flag, settings=settings
+                        )
     else:
         process_app(path, namespace, create_pr, prometheus, __key, context=context,
                     clean_resources_flag=clean_resources_flag, settings=settings)
