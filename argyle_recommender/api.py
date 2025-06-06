@@ -116,3 +116,62 @@ async def get_app_with_selector(request: Request, app_name: Optional[str],
     finally:
         shutil.rmtree(repo.working_dir, ignore_errors=True)
 
+
+@app.post("/handle_alert")
+async def post_handle_alert(request: Request):
+    """Handle incoming alerts from the victoria metrics alertmanager.
+    This endpoint expects a JSON payload with the alert details.
+    Initial implementation will handle ComponentOutOfMemory alerts.
+    The alert payload should be in the format specified in docs
+    https://prometheus.io/docs/alerting/latest/configuration/#webhook_config
+
+    Example payload:
+    {
+        "version": "4",
+        "groupKey": <string>,              // key identifying the group of alerts (e.g. to deduplicate)
+        "truncatedAlerts": <int>,          // how many alerts have been truncated due to "max_alerts"
+        "status": "<resolved|firing>",
+        "receiver": <string>,
+        "groupLabels": <object>,
+        "commonLabels": <object>,
+        "commonAnnotations": <object>,
+        "externalURL": <string>,           // backlink to the Alertmanager.
+        "alerts": [
+            {
+            "status": "<resolved|firing>",
+            "labels": <object>,
+            "annotations": <object>,
+            "startsAt": "<rfc3339>",
+            "endsAt": "<rfc3339>",
+            "generatorURL": <string>,      // identifies the entity that caused the alert
+            "fingerprint": <string>        // fingerprint to identify the alert
+            },
+            ...
+        ]
+    }
+    """
+    if not request.headers.get("Content-Type") == "application/json":
+        raise HTTPException(status_code=400, detail="Content-Type must be application/json")
+    data = await request.json()
+    log.info(f"Received alert: {data}")
+    if not data.get("alerts"):
+        log.error("No alerts found in the payload")
+        raise HTTPException(status_code=400, detail="No alerts found in the payload")
+    alert = data.get("alerts")[0]
+    if len(data.get("alerts")) > 1:
+        log.warning(f"Received multiple alerts, only processing the first one: {alert}")
+    if not data.get("status") or data["status"] != "firing":
+        log.info("Alert is not firing, ignoring")
+        return {"message": "Alert is not firing, ignoring"}
+    if not alert.get("labels") or not alert["labels"].get("alertname"):
+        log.error("Alert does not have a valid alertname label")
+        raise HTTPException(status_code=400, detail="Alert does not have a valid alertname label")
+    alert_name = alert["labels"]["alertname"]
+    if alert_name != "ComponentOutOfMemory":
+        log.info(f"Alert {alert_name} is not handled by this endpoint, ignoring")
+        return {"message": f"Alert {alert_name} is not handled by this endpoint, ignoring"}
+    container_name = alert["labels"].get("container")
+    namespace = alert["labels"].get("namespace")
+    pod_name = alert["labels"].get("pod")
+    # workload_name = alert["labels"].
+    return {"message": f"Alert received for {container_name}/{pod_name} in {namespace} namespace"}
