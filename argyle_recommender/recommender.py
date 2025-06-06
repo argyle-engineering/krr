@@ -338,6 +338,14 @@ def create_resource_transformers(results: Result, path: Union[str, pathlib.Path]
                         and r["kind"] == WORKLOADS_MAP[kind])]
                 if "?" in [resource_quota.get("requests", {}).get("cpu"),
                            resource_quota.get("requests", {}).get("memory")]:
+                    log.info("Resource quota for %s/%s/%s/%s  not set, skipped due to missing values", kind, namespace, name, container)
+                    if scan.recommended.info is not None:
+                        cpu_info = scan.recommended.info.get("cpu")
+                        memory_info = scan.recommended.info.get("memory")
+                        if cpu_info is not None:
+                            log.info("CPU info: %s", cpu_info)
+                        if memory_info is not None:
+                            log.info("Memory info: %s", memory_info)
                     continue
                 transformer["resourceQuotas"].append(resource_quota)
             except TypeError as e:
@@ -372,14 +380,24 @@ def total_estimate_in_table(table, results):
     table.add_column("RAM cost")
 
     for scan in results.scans:
-        if scan.object.warnings is not None:
+        if scan.object.warnings is not None and len(scan.object.warnings) > 0:
             if ("NoPrometheusCPUMetrics" in scan.object.warnings or
                 "NoPrometheusMemoryMetrics" in scan.object.warnings):
                 continue
+            log.info("Object %s has warnings %s", scan.object.name, scan.object.warnings)
         n_pods = scan.object.current_pods_count
         cpu = scan.recommended.requests["cpu"].value * n_pods or 0
         ram = scan.recommended.requests["memory"].value * n_pods or 0
-
+        try:
+            cpu = float(cpu)
+        except (ValueError, TypeError):
+            log.info("cpu for object %s is not a number %s", scan.object.name, cpu)
+            cpu = 0
+        try:
+            ram = float(ram)
+        except (ValueError, TypeError):
+            log.info("ram for object %s is not a number %s", scan.object.name, ram)
+            ram = 0
         total_cpu += cpu
         total_ram += ram
         cpu_cost, ram_cost, node_cost = estimate_cost(cpu, ram)
