@@ -18,7 +18,7 @@ from robusta_krr import formatters as concrete_formatters  # noqa: F401
 from robusta_krr.core.abstract import formatters
 from robusta_krr.core.abstract.strategies import BaseStrategy
 from robusta_krr.core.models.config import Config
-from robusta_krr.core.runner import Runner
+from robusta_krr.core.runner import Runner, publish_input_error
 from robusta_krr.utils.version import get_version
 
 app = typer.Typer(
@@ -264,8 +264,62 @@ def load_commands() -> None:
                 slack_output: Optional[str] = typer.Option(
                     None,
                     "--slackoutput",
-                    help="Send to output to a slack channel, must have SLACK_BOT_TOKEN",
+                    help="Send output to Slack. Values starting with # will be interpreted to be channel names but other values may refer to channel IDs. SLACK_BOT_TOKEN env variable must exist with permissions: chat:write, files:write, chat:write.public. Bot must be added to the channel.",
                     rich_help_panel="Output Settings",
+                ),
+                slack_title: Optional[str] = typer.Option(
+                    None,
+                    "--slacktitle",
+                    help="Title of the slack message. If not provided, will use the default 'Kubernetes Resource Report for <environment>'.",
+                    rich_help_panel="Output Settings",
+                ),
+                azureblob_output: Optional[str] = typer.Option(
+                    None,
+                    "--azurebloboutput",
+                    help="Provide Azure Blob Storage SAS URL (with the container) to upload the output file to (e.g., https://mystorageaccount.blob.core.windows.net/container?sv=...). The filename will be automatically appended.",
+                    rich_help_panel="Output Settings",
+                ),
+                teams_webhook: Optional[str] = typer.Option(
+                    None,
+                    "--teams-webhook",
+                    help="Microsoft Teams webhook URL to send notifications when files are uploaded to Azure Blob Storage",
+                    rich_help_panel="Output Settings",
+                ),
+                azure_subscription_id: Optional[str] = typer.Option(
+                    None,
+                    "--azure-subscription-id",
+                    help="Azure Subscription ID for Teams notification Azure Portal links",
+                    rich_help_panel="Output Settings",
+                ),
+                azure_resource_group: Optional[str] = typer.Option(
+                    None,
+                    "--azure-resource-group",
+                    help="Azure Resource Group for Teams notification Azure Portal links",
+                    rich_help_panel="Output Settings",
+                ),
+                publish_scan_url: Optional[str] = typer.Option(
+                    None,
+                    "--publish_scan_url",
+                    help="Sends the output to a robusta_runner instance",
+                    rich_help_panel="Publish Scan Settings",
+                ),
+                start_time: Optional[str] = typer.Option(
+                    None,
+                    "--start_time",
+                    help="Start time of the scan",
+                    rich_help_panel="Publish Scan Settings",
+                ),
+                scan_id: Optional[str] = typer.Option(
+                    None,
+                    "--scan_id",
+                    help="A UUID scan identifier",
+                    rich_help_panel="Publish Scan Settings",
+                ),
+                named_sinks: Optional[List[str]] = typer.Option(
+                    None,
+                    "--named_sinks",
+                    help="A list of sinks to send the scan to",
+                    rich_help_panel="Publish Scan Settings",
                 ),
                 **strategy_args,
             ) -> None:
@@ -308,13 +362,23 @@ def load_commands() -> None:
                         file_output=file_output,
                         file_output_dynamic=file_output_dynamic,
                         slack_output=slack_output,
+                        slack_title=slack_title,
+                        azureblob_output=azureblob_output,
+                        teams_webhook=teams_webhook,
+                        azure_subscription_id=azure_subscription_id,
+                        azure_resource_group=azure_resource_group,
                         show_severity=show_severity,
                         strategy=_strategy_name,
                         other_args=strategy_args,
-                    )
+                        publish_scan_url=publish_scan_url,
+                        start_time=start_time,
+                        scan_id=scan_id,
+                        named_sinks=named_sinks,
+                        )
                     Config.set_config(config)
-                except ValidationError:
+                except ValidationError as e:
                     logger.exception("Error occured while parsing arguments")
+                    publish_input_error( publish_scan_url, scan_id, start_time, str(e), named_sinks)
                 else:
                     runner = Runner()
                     exit_code = asyncio.run(runner.run())
