@@ -2,7 +2,6 @@
 import textwrap
 from typing import Literal
 
-from pkg_resources import normalize_path
 import pydantic as pd
 import numpy as np
 

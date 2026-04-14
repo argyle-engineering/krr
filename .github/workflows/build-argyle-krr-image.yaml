@@ -1,0 +1,89 @@
+name: build-argyle-krr-image
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      branch_name:
+        description: Branch on which to build
+        required: true
+
+defaults:
+  run:
+    shell: bash -Eeuxo pipefail {0}
+
+env:
+  BUILDX_CACHE_PATH: /tmp/.buildx-cache
+  DOCKER_IMAGE_NAME: us-docker.pkg.dev/argyle-artifacts/hub/argyle-krr
+  SERVICE_NAME: krr
+  K8S_REPO_REF: master
+
+jobs:
+
+  build-push-image:
+    runs-on: argyle-runner
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+    - uses: actions/checkout@v2
+      with:
+        fetch-depth: 0
+
+    - uses: google-github-actions/auth@v2.1.12
+      id: docker-auth
+      with:
+        workload_identity_provider: ${{ secrets.WORKLOAD_IDENTITY_PROVIDER }}
+        service_account: github-artifactor-hub@argyle-artifacts.iam.gserviceaccount.com
+        export_environment_variables: false
+        create_credentials_file: false
+        token_format: access_token
+
+    - uses: docker/login-action@v3.1.0
+      with:
+        registry: us-docker.pkg.dev
+        username: oauth2accesstoken
+        password: ${{ steps.docker-auth.outputs.access_token }}
+
+    - name: Set up Docker buildx
+      uses: docker/setup-buildx-action@v3.3.0
+
+    - name: Set docker tag
+      id: tag
+      run: |
+        short_sha=$(git rev-parse --short HEAD)
+        tag="${{ github.event.inputs.branch_name }}-${short_sha}"
+
+        echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+    - uses: docker/build-push-action@v6
+      with:
+        platforms: linux/amd64
+        context: ./
+        file: argyle_recommender/Dockerfile
+        push: true
+        tags: |
+          ${{ env.DOCKER_IMAGE_NAME }}:${{ steps.tag.outputs.tag  }}
+          ${{ env.DOCKER_IMAGE_NAME }}:latest
+        cache-from: type=local,src=${{ env.BUILDX_CACHE_PATH }}
+        cache-to: type=local,dest=${{ env.BUILDX_CACHE_PATH }}
+        secrets: |
+          GITHUB_TOKEN=${{ secrets.REPO_ACCESS_TOKEN }}
+
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+
+  k8s-pr:
+    name: Update argyle-krr k8s manifests
+    runs-on: argyle-runner
+    needs: [build-push-image]
+    steps:
+    - name: Do an automatic PR
+      uses: argyle-systems/github-action-update-image@v1.1.14
+      with:
+        repo-token: ${{ secrets.REPO_ACCESS_TOKEN }}
+        service_name: ${{ env.SERVICE_NAME }}
+        image_filename: namespaces/krr/${{ env.SERVICE_NAME }}-imagetransformer.yaml
+        version_tag: ${{ needs.build-push-image.outputs.tag }}
+        k8s_repo_ref: master

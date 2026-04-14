@@ -35,6 +35,9 @@ from robusta_krr.core.models.result import Result, Recommendation
 from robusta_krr.core.models.config import Config
 from robusta_krr.utils import resource_units
 
+# Load krr_argyle_strategy to register the strategy
+from krr_argyle_strategy import ArgyleStrategy  # noqa: F401
+
 WORKLOADS = ["Deployment", "Rollout", "Job", "DaemonSet", "StatefulSet", "CronJob"]
 WORKLOADS_MAP = {
     "deployment": "Deployment",
@@ -103,7 +106,7 @@ def get_krr_json(label, namespace: Optional[str] ="*", prometheus=None, context=
     context_flag = []
     if context is not None:
         context_flag = ["--context", context]
-    command = ["krr", "argyle",
+    command = [os.path.join(os.path.dirname(__file__), "krr_argyle_strategy.py"), "argyle",
                "-f", "json", "-q"]
     command.extend(selector)
     command.extend(namespace_flag)
@@ -367,6 +370,37 @@ def _actual_cost(costs: dict, ondemand_ratio: float):
     )
 
 
+def _float_diff(scan, resource, n_pods):
+    current = scan.object.allocations.requests[resource.name.lower()]
+    if current is None:
+        current = 0
+    if scan.recommended.requests[resource.name.lower()].value == "?":
+        return 0
+    if scan.recommended.requests[resource.name.lower()].value is None:
+        return 0
+    recommended = float(scan.recommended.requests[resource.name.lower()].value)
+    return (recommended - current) * n_pods
+
+
+def total_diff_in_table(table, results):
+    total_diff = dict()
+    for resource in ResourceType:
+        total_diff[resource.name] = 0
+
+    for scan in results.scans:
+        n_pods = scan.object.current_pods_count
+        for resource in ResourceType:
+            total_diff[resource.name] += _float_diff(scan, resource, n_pods)
+
+    table.show_footer = True
+    table.columns[0].footer = "Total"
+
+    for resource in ResourceType:
+        resource_index = [i for i, column in enumerate(table.columns) if f"{resource.name} Diff" == column.header][0]
+        diff_val = total_diff[resource.name]
+        diff_sign = "[green]+[/green]" if diff_val >= 0 else "[red]-[/red]"
+        table.columns[resource_index].footer = f"{diff_sign}{_format(abs(diff_val))}"
+
 def total_estimate_in_table(table, results):
     total_cpu = 0
     total_ram = 0
@@ -594,6 +628,7 @@ def process_app(path: Union[str, pathlib.Path], namespace,
             clean_resources(path)
         create_resource_transformers(results, path)
         tbl = table(results)
+        total_diff_in_table(tbl, results)
         total_estimate_in_table(tbl, results)
         merge_pr_flag = should_merge_pr(results)
 
@@ -744,7 +779,7 @@ Monthly cost estimates are based on the same strategy used to adjust resources.
             if merge_pr_flag:
                 labels.append("krr-automerge")
             pr.add_to_labels(*labels)
-            repo.remote("origin").pull("master")
+            repo.remote("origin").pull("master", ff_only=True)
             repo.heads["master"].checkout()
             return pr
         except github.GithubException as e:

@@ -137,3 +137,4 @@ robusta_lib
 
 *.private-key.pem
 k8s_repo/
+tmp.*/

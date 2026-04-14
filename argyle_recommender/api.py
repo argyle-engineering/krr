@@ -18,6 +18,9 @@ app = FastAPI(title="Argyle Recommender API", version="1.0.0")
 log.info("Starting Argyle Recommender API")
 
 key_file = os.environ.get("PRIVATE_KEY_FILE")
+
+PROMETHEUS = os.environ.get("PROMETHEUS")
+
 if key_file:
     with open(key_file, "r", encoding="utf-8") as _f:
         __key = _f.read()
@@ -65,7 +68,7 @@ async def get_app(request: Request, app_name: str):
             raise HTTPException(status_code=404, detail="App not found")
         try:
             create_pr = True
-            prometheus = None
+            prometheus = PROMETHEUS
             clean_resources_flag = True
             settings = {}
             namespace = None
@@ -97,7 +100,7 @@ async def get_app_with_selector(request: Request, app_name: Optional[str],
             # raise HTTPException(status_code=404, detail="App not found")
         try:
             create_pr = True
-            prometheus = None
+            prometheus = PROMETHEUS
             settings = {}
             namespace = None
             results = get_krr_json(f"{selector_name}={selector_value}", namespace, prometheus,

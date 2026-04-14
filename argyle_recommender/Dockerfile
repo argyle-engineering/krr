@@ -1,52 +1,57 @@
-FROM python:3.11 as builder
+FROM python:3.11 AS builder
 
 # Set the working directory
 WORKDIR /app
 ARG KUSTOMIZE_FMT_VERSION=0.0.10
 
-# Install system dependencies required for Poetry
-ENV PIP_NO_CACHE_DIR=off \
-    PIP_DISABLE_PIP_VERSION_CHECK=on \
-    PIP_DEFAULT_TIMEOUT=100 \
-    POETRY_VERSION="1.7.1" \
-    POETRY_VENV="/opt/poetry-venv"
 
 RUN apt-get update \
     && dpkg --add-architecture arm64 \
     && apt-get install --no-install-recommends -y \
         build-essential curl gpg
 
+# Install gh cli to get internal tools
 RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | gpg --dearmor -o /usr/share/keyrings/githubcli-archive-keyring.gpg;
 RUN echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | tee /etc/apt/sources.list.d/github-cli.list > /dev/null;
 RUN apt update && apt install -y gh;
 
-# https://python-poetry.org/docs/#installing-manually
-RUN python -m venv ${POETRY_VENV}
-RUN ${POETRY_VENV}/bin/pip install -U pip setuptools
-RUN ${POETRY_VENV}/bin/pip install "poetry==${POETRY_VERSION}"
-RUN ${POETRY_VENV}/bin/poetry config virtualenvs.create false
 
-COPY pyproject.toml pyproject.toml
-COPY poetry.lock poetry.lock
+ENV VIRTUAL_ENV=/venv
+ENV UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    UV_FROZEN=1 \
+    UV_NO_SYNC=1 \
+    UV_NO_DEV=1 \
+    UV_NO_EDITABLE=1 \
+    UV_PROJECT_ENVIRONMENT=$VIRTUAL_ENV
 
-# Install the project dependencies
-RUN ${POETRY_VENV}/bin/poetry install
+# Install uv and configure venv
+COPY --from=ghcr.io/astral-sh/uv:0.9.26 /uv /uvx /bin/
+
+ENV PATH="/root/.local/bin:${PATH}"
+
+# get ksops
 RUN curl -sLo ksops.tar.gz https://github.com/argyle-engineering/ksops/releases/download/v2.0.8/ksops_Linux_x86_64.tar.gz \
     && tar -xvf ksops.tar.gz ksops \
     && mkdir -p "$HOME/go/bin" \
     && mv ksops "$HOME/go/bin" 
+# get kustomize
 RUN curl -s "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh" | bash -s - 5.4.1 $HOME/go/bin/
+# get argyle-resource-quota-transformer
 RUN --mount=type=secret,id=GITHUB_TOKEN \
     export GH_TOKEN=$(cat /run/secrets/GITHUB_TOKEN) \
     && gh release download --clobber -R "argyle-systems/argyle-resource-quota-transformer" --pattern "argyle-resource-quota-transformer_linux_x86_64.tar.gz" -D "/tmp" \
     && tar -xzf "/tmp/argyle-resource-quota-transformer_linux_x86_64.tar.gz" -C "/tmp" \
     && mv "/tmp/argyle-resource-quota-transformer" "/root/go/bin"
+# get argyle-kustomize-fmt
 RUN --mount=type=secret,id=GITHUB_TOKEN \
     export GH_TOKEN=$(cat /run/secrets/GITHUB_TOKEN) \
     && gh release download --clobber -R "argyle-systems/argyle-kustomize-fmt" --pattern "argyle-kustomize-fmt_${KUSTOMIZE_FMT_VERSION}_linux_386.tar.gz" -O "/tmp/argyle-kustomize-fmt_Linux_x86_64.tar.gz" \
     && tar -xzf "/tmp/argyle-kustomize-fmt_Linux_x86_64.tar.gz" -C "/tmp" \
     && mv "/tmp/argyle-kustomize-fmt" "/root/go/bin"
-ENV PATH="${POETRY_VENV}/bin:/root/go/bin:/google-cloud-sdk/bin::${PATH}"
+
+# get gke-gcloud-auth-plugin and add to path
+ENV PATH="/google-cloud-sdk/bin:${PATH}"
 
 RUN curl -fsSLO https://dl.google.com/dl/cloudsdk/channels/rapid/google-cloud-sdk.tar.gz \
     && tar xzf google-cloud-sdk.tar.gz -C / \
@@ -56,11 +61,14 @@ RUN curl -fsSLO https://dl.google.com/dl/cloudsdk/channels/rapid/google-cloud-sd
     gcloud config set metrics/environment github_docker_image && \
     gcloud components install alpha beta gke-gcloud-auth-plugin
 
+# get kubectl
 RUN curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
 
 # Copy the rest of the application code
 COPY . .
 
-RUN ${POETRY_VENV}/bin/poetry install
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync
+
 # Run the application using 'poetry run krr simple'
-CMD ["$POETRY_VENV/bin/python", "krr.py", "simple"]
+CMD ["/venv/bin/python", "argyle_recommender/recommender.py", "argyle"]

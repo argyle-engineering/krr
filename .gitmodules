@@ -1,0 +1,3 @@
+[submodule "krr"]
+	path = krr
+	url = git@github.com:argyle-engineering/krr.git
