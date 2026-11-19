@@ -712,14 +712,10 @@ class ClusterLoader:
         return result
 
     async def __list_hpa_v1(self) -> dict[HPAKey, HPAData]:
-        loop = asyncio.get_running_loop()
-        res = await loop.run_in_executor(
-            self.executor,
-            lambda: self._list_namespaced_or_global_objects(
-                kind="HPA-v1",
-                all_namespaces_request=self.autoscaling_v1.list_horizontal_pod_autoscaler_for_all_namespaces,
-                namespaced_request=self.autoscaling_v1.list_namespaced_horizontal_pod_autoscaler,
-            ),
+        res = await self._list_namespaced_or_global_objects(
+            kind="HPA-v1",
+            all_namespaces_request=self.autoscaling_v1.list_horizontal_pod_autoscaler_for_all_namespaces,
+            namespaced_request=self.autoscaling_v1.list_namespaced_horizontal_pod_autoscaler,
         )
         return {
             (
@@ -734,7 +730,7 @@ class ClusterLoader:
                 target_cpu_utilization_percentage=hpa.spec.target_cpu_utilization_percentage,
                 target_memory_utilization_percentage=None,
             )
-            async for hpa in res
+            for hpa in res
         }
 
     async def __list_hpa_v2(self) -> dict[HPAKey, HPAData]:
@@ -864,7 +860,7 @@ class KubernetesLoader:
         self.cluster_loaders = {cl.cluster: cl for cl in _cluster_loaders if cl is not None}
         if self.cluster_loaders == {}:
             logger.error("Could not load any cluster.")
-            return
+            return []
         
         return [
             object
